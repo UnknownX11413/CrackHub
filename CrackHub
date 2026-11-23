@@ -1,0 +1,2815 @@
+-- MAJAPAHIT RP V1 | Hub: Auto Fishing + Auto Tani + Auto Ternak (1 UI, ala iOS)
+-- Tombol RightShift = tampil/sembunyi menu. Titik kuning = minimize, titik merah = matikan semua.
+
+local Players = game:GetService("Players")
+local RS = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local UIS = game:GetService("UserInputService")
+local VIM = game:GetService("VirtualInputManager")
+local CS = game:GetService("CollectionService")
+local TweenService = game:GetService("TweenService")
+
+local LP = Players.LocalPlayer
+local PG = LP:WaitForChild("PlayerGui")
+
+if getgenv then
+	local old = getgenv().MajapahitHub
+	if old and old.Kill then pcall(old.Kill) end
+end
+
+local Hub = { Alive = true, Conns = {}, Mods = {} }
+if getgenv then getgenv().MajapahitHub = Hub end
+
+local function on(sig, fn)
+	local c = sig:Connect(fn)
+	table.insert(Hub.Conns, c)
+	return c
+end
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "MajapahitRP_V1"
+gui.ResetOnSpawn = false
+gui.IgnoreGuiInset = true
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+gui.Parent = (gethui and gethui()) or game:GetService("CoreGui")
+
+Hub.Kill = function()
+	Hub.Alive = false
+	for _, m in pairs(Hub.Mods) do
+		if m.Kill then pcall(m.Kill) end
+	end
+	for _, c in ipairs(Hub.Conns) do pcall(function() c:Disconnect() end) end
+	pcall(function() gui:Destroy() end)
+	if getgenv then getgenv().MajapahitHub = nil end
+end
+
+--====================================================================
+-- MODUL 1: AUTO FISHING
+--====================================================================
+local function ModFishing()
+	local FS = RS:WaitForChild("FishingSystem", 5)
+	local Modules = FS and FS:WaitForChild("FishingModules", 5)
+	if not Modules then return nil, "FishingSystem tidak ditemukan di game ini" end
+
+	local GUIManager = require(Modules:WaitForChild("GUIManager"))
+	local MinigameSystem = require(Modules:WaitForChild("MinigameSystem"))
+	local PowerBarSystem = require(Modules:WaitForChild("PowerBarSystem"))
+
+	local CFG = {
+		CastTargetPower = 0.95,
+		MinHold = 0.6,
+		CastChargeTimeout = 3.5,
+		BiteTimeout = 45,
+		AfterCatchDelay = 2.5,
+		PredictGain = 0.28,
+		ClickPos = nil,
+	}
+
+	local running = false
+	local caught = 0
+	local holding = false
+	local isMobile = UIS.TouchEnabled and not UIS.KeyboardEnabled
+
+	local function clickPos()
+		if CFG.ClickPos then return CFG.ClickPos end
+		local v = workspace.CurrentCamera.ViewportSize
+		return Vector2.new(v.X * 0.5, v.Y * 0.25)
+	end
+
+	local function mouse(down)
+		local p = clickPos()
+		VIM:SendMouseButtonEvent(p.X, p.Y, 0, down, game, 0)
+	end
+
+	local function setHold(state)
+		if holding == state then return end
+		holding = state
+		if isMobile then
+			local btn = GUIManager:GetElement("tapMobileButton")
+			if btn then
+				local pos = btn.AbsolutePosition + btn.AbsoluteSize / 2
+				VIM:SendTouchEvent(1, state and 0 or 2, pos.X, pos.Y + 36)
+			end
+		else
+			mouse(state)
+		end
+	end
+
+	local function getChar()
+		local c = LP.Character
+		if not c then return end
+		local hum = c:FindFirstChildOfClass("Humanoid")
+		local hrp = c:FindFirstChild("HumanoidRootPart")
+		if hum and hrp and hum.Health > 0 then return c, hum, hrp end
+	end
+
+	local function ensureRod(char, hum)
+		for _, t in ipairs(char:GetChildren()) do
+			if t:IsA("Tool") and CS:HasTag(t, "Rod") and t:FindFirstChild("Part") then
+				return t
+			end
+		end
+		local bp = LP:FindFirstChild("Backpack")
+		if bp then
+			for _, t in ipairs(bp:GetChildren()) do
+				if t:IsA("Tool") and CS:HasTag(t, "Rod") then
+					hum:EquipTool(t)
+					task.wait(0.8)
+					return t
+				end
+			end
+		end
+	end
+
+	local function powerFill()
+		local f = GUIManager:GetElement("fillFrame")
+		if not f then return 0 end
+		local p = f.Parent
+		local r = 0
+		if p and p:IsA("GuiObject") and p.AbsoluteSize.X > 0 and p.AbsoluteSize.Y > 0 then
+			r = math.max(f.AbsoluteSize.X / p.AbsoluteSize.X, f.AbsoluteSize.Y / p.AbsoluteSize.Y)
+		end
+		return math.max(r, f.Size.X.Scale, f.Size.Y.Scale)
+	end
+
+	local function doCast(rod)
+		if isMobile then
+			local btn = GUIManager:GetElement("tapMobileButton")
+			if not btn then return false end
+			firesignal(btn.MouseButton1Click)
+			local t0 = os.clock()
+			while running and os.clock() - t0 < CFG.CastChargeTimeout do
+				if os.clock() - t0 >= CFG.MinHold and powerFill() >= CFG.CastTargetPower then break end
+				task.wait()
+			end
+			firesignal(btn.MouseButton1Click)
+			return true
+		end
+
+		mouse(true)
+		task.wait(0.1)
+		if not PowerBarSystem:IsCharging() then
+			PowerBarSystem:StartCharging(rod.Name)
+		end
+
+		local t0 = os.clock()
+		while running and os.clock() - t0 < 1 and not PowerBarSystem:IsCharging() do task.wait() end
+
+		t0 = os.clock()
+		while running and os.clock() - t0 < CFG.CastChargeTimeout do
+			if os.clock() - t0 >= CFG.MinHold and powerFill() >= CFG.CastTargetPower then break end
+			task.wait()
+		end
+
+		mouse(false)
+		task.wait(0.15)
+
+		local retry = 0
+		while PowerBarSystem:IsCharging() and retry < 5 do
+			mouse(false)
+			retry += 1
+			task.wait(0.15)
+		end
+		return true
+	end
+
+	local lastZone, lastT = nil, nil
+	on(RunService.RenderStepped, function()
+		if not running or not MinigameSystem:IsActive() then
+			if holding then setHold(false) end
+			lastZone, lastT = nil, nil
+			return
+		end
+
+		local zone = GUIManager:GetElement("reelZone")
+		local fish = GUIManager:GetElement("reelFish")
+		if not (zone and fish) then return end
+
+		local zx = zone.Position.X.Scale
+		local fx = fish.Position.X.Scale
+		local now = os.clock()
+
+		local vel = 0
+		if lastZone and lastT and now > lastT then
+			vel = (zx - lastZone) / (now - lastT)
+		end
+		lastZone, lastT = zx, now
+
+		setHold((fx - (zx + vel * CFG.PredictGain)) > 0)
+	end)
+
+	local function cycle()
+		local char, hum = getChar()
+		if not char then task.wait(1) return end
+		local rod = ensureRod(char, hum)
+		if not rod then task.wait(1) return end
+
+		if MinigameSystem:IsActive() then task.wait(0.2) return end
+
+		doCast(rod)
+		if not running then return end
+
+		local t0 = os.clock()
+		while running and not MinigameSystem:IsActive() and os.clock() - t0 < CFG.BiteTimeout do
+			task.wait(0.1)
+		end
+
+		if MinigameSystem:IsActive() then
+			while running and MinigameSystem:IsActive() do task.wait(0.1) end
+			setHold(false)
+			caught += 1
+			task.wait(CFG.AfterCatchDelay)
+		else
+			task.wait(3)
+		end
+	end
+
+	local function setRunning(v)
+		running = v and true or false
+		if not running then
+			setHold(false)
+			if PowerBarSystem:IsCharging() then mouse(false) end
+		end
+	end
+
+	task.spawn(function()
+		while Hub.Alive do
+			if running then pcall(cycle) end
+			task.wait(0.3)
+		end
+	end)
+
+	return {
+		CFG = CFG,
+		SetActive = setRunning,
+		IsActive = function() return running end,
+		Kill = function() setRunning(false) end,
+		Info = function() return ("Tertangkap: %d"):format(caught) end,
+	}
+end
+
+--====================================================================
+-- MODUL 2: AUTO TANI
+--====================================================================
+local function ModTani()
+	local Tani = RS:WaitForChild("Tani", 5)
+	if not Tani then return nil, "Folder Tani tidak ditemukan di game ini" end
+	local Cfg = require(Tani:WaitForChild("TaniConfig"))
+	local Aksi = Tani:WaitForChild("Tani_Aksi")
+
+	local S = {
+		Run = true, Aktif = false, ESP = true,
+		Cangkul = true, Tanam = true,
+		Bibit = (Cfg.URUT_BIBIT and Cfg.URUT_BIBIT[1]) or "Bibit Padi",
+		Panen = true, Petik = true, Pungut = true, Goyang = true, Tebang = true, Siram = true, Lain = false,
+		Margin = 0, Force = nil, Conns = {}, Native = {},
+	}
+	if getgenv then getgenv().AutoTani = S end
+
+	local DEPAN = Cfg.JARAK_DEPAN or 3.5
+	local N = Cfg.RUMPUN_PER_SISI or 4
+	local dirty, goyangBusy, addTick = true, false, 0
+	local status = "Siap"
+	local Ps, pconns, hooked = {}, {}, {}
+	local cool, fails, failUntil = {}, {}, {}
+	local gen = 0
+	local curKey = nil
+	local plantKey = setmetatable({}, { __mode = "k" })
+	local plantT = setmetatable({}, { __mode = "k" })
+	local D = { acts = {}, empties = {}, emptyKeys = {}, esp = {}, n = { kosong = 0, siap = 0, tumbuh = 0, tebang = 0 } }
+
+	-- ===== MEMORI TANAH PER SEL =====
+	local soil = {}
+	local function getSoil(k)
+		local s = soil[k]
+		if not s then
+			s = { stage = "rata", hits = 0, tries = 0, t = 0 }
+			soil[k] = s
+		end
+		return s
+	end
+	local function setStage(s, st)
+		s.stage, s.hits, s.t = st, 0, os.clock()
+	end
+
+	local HOE = { ["Bibit Padi"] = 2, ["Bibit Pisang"] = 3 }
+	local function hoeCount(b)
+		return HOE[b] or (Cfg.GUNDUKAN and Cfg.GUNDUKAN.CANGKUL_KALI) or 3
+	end
+
+	local function legacy(b)
+		b = b or S.Bibit
+		local d = Cfg.BIBIT and Cfg.BIBIT[b]
+		local t = d and Cfg.TANAMAN and Cfg.TANAMAN[d.jenis]
+		return (t and t.gundukan) or b == "Bibit Pisang"
+	end
+
+	local tilled, tillUntil = setmetatable({}, { __mode = "k" }), 0
+	local moundWords = { "gundukan", "mound", "tanah", "cangkul", "lubang", "dig", "soil", "bedeng" }
+	local function isTilled(c)
+		if tilled[c] then return true end
+		local n = c.Name:lower()
+		for _, w in ipairs(moundWords) do if n:find(w, 1, true) then return true end end
+		return false
+	end
+
+	local anchors = Instance.new("Folder")
+	anchors.Name = "AT_" .. math.random(10000, 99999)
+	anchors.Parent = workspace
+
+	local function mark() dirty = true end
+	local function bind(sig, fn) local c = sig:Connect(fn) table.insert(S.Conns, c) return c end
+	local function clearP() for _, c in ipairs(pconns) do pcall(function() c:Disconnect() end) end table.clear(pconns) table.clear(hooked) end
+
+	local espGui = Instance.new("Folder")
+	espGui.Name = "ESP"
+	espGui.Parent = gui
+
+	S.Stop = function()
+		S.Run = false S.Aktif = false
+		for _, c in ipairs(S.Conns) do pcall(function() c:Disconnect() end) end
+		clearP()
+		for _, c in ipairs(S.Native) do pcall(function() c:Enable() end) end
+		pcall(function() espGui:Destroy() end)
+		pcall(function() anchors:Destroy() end)
+	end
+
+	-- ===== util =====
+	local function hum() local c = LP.Character return c and c:FindFirstChildOfClass("Humanoid") end
+	local function hrp() local c = LP.Character return c and c:FindFirstChild("HumanoidRootPart") end
+	local function alive() local h = hum() return h and h.Health > 0 and hrp() end
+	local function flat(v) return Vector3.new(v.X, 0, v.Z) end
+	local function d2(a, b) return (flat(a) - flat(b)).Magnitude end
+	local function unit(v, fb) v = flat(v) return v.Magnitude > 0.05 and v.Unit or fb end
+
+	local function posOf(o)
+		if o:IsA("Model") then return o:GetPivot().Position end
+		if o:IsA("BasePart") then return o.Position end
+	end
+
+	local function findTool(name)
+		for _, par in ipairs({ LP.Character, LP.Backpack }) do
+			if par then
+				for _, t in ipairs(par:GetChildren()) do
+					if t:IsA("Tool") and (t.Name == name or t.Name:find(name, 1, true) == 1) then return t end
+				end
+			end
+		end
+	end
+
+	local function equip(name)
+		local t, h = findTool(name), hum()
+		if not (t and h) then return nil end
+		if t.Parent ~= LP.Character then h:EquipTool(t) task.wait(0.25) end
+		return t
+	end
+
+	local function tpTo(pos, face, gy)
+		local r, h = hrp(), hum()
+		if not (r and h) then return end
+		if not gy then
+			local rp = RaycastParams.new()
+			rp.FilterType = Enum.RaycastFilterType.Exclude
+			rp.FilterDescendantsInstances = { LP.Character, anchors }
+			local hit = workspace:Raycast(pos + Vector3.new(0, 3, 0), Vector3.new(0, -40, 0), rp)
+			gy = hit and hit.Position.Y or pos.Y
+		end
+		local p = Vector3.new(pos.X, gy + h.HipHeight + r.Size.Y / 2 + 0.1, pos.Z)
+		local f = Vector3.new(face.X, p.Y, face.Z)
+		if (f - p).Magnitude < 0.1 then f = p + Vector3.new(0, 0, -1) end
+		r.AssemblyLinearVelocity = Vector3.zero
+		r.CFrame = CFrame.lookAt(p, f)
+	end
+
+	-- ===== kepemilikan =====
+	local ownerKeys = { "Owner", "owner", "Pemilik", "OwnerId", "UserId", "Player", "PlayerId" }
+	local function isMine(v)
+		return v ~= nil and (v == LP.UserId or v == LP.Name or v == LP.DisplayName or tostring(v) == tostring(LP.UserId))
+	end
+	local function ownerAttr(o)
+		for _, k in ipairs(ownerKeys) do
+			local v = o:GetAttribute(k)
+			if v ~= nil then return v end
+		end
+	end
+	local function promptOwner(p)
+		local o = p
+		for _ = 1, 5 do
+			if not o or o == workspace then break end
+			local v = ownerAttr(o)
+			if v ~= nil then return v end
+			o = o.Parent
+		end
+	end
+	local function ownerOk(p)
+		local v = promptOwner(p)
+		return v == nil or v == 0 or v == "0" or v == "" or isMine(v)
+	end
+
+	local function objMine(o)
+		local v = ownerAttr(o)
+		if v ~= nil and isMine(v) then return true end
+		if o:IsA("TextLabel") or o:IsA("TextButton") or o:IsA("TextBox") then
+			local t = o.Text:lower()
+			if t:find(LP.Name:lower(), 1, true) or t:find(LP.DisplayName:lower(), 1, true) then return true end
+		elseif o:IsA("StringValue") or o:IsA("IntValue") or o:IsA("NumberValue") then
+			if isMine(o.Value) then return true end
+		elseif o:IsA("ObjectValue") and o.Value == LP then
+			return true
+		end
+		return false
+	end
+
+	local function petakMine(pt)
+		if objMine(pt) then return true end
+		for _, o in ipairs(pt:GetDescendants()) do
+			if objMine(o) then return true end
+		end
+		return false
+	end
+
+	-- ===== petak =====
+	local function nearestPetak(all)
+		local r = hrp()
+		local best, bd
+		for _, p in ipairs(all) do
+			local d = r and (p.area.Position - r.Position).Magnitude or 0
+			if not bd or d < bd then best, bd = p, d end
+		end
+		return best
+	end
+
+	local function reload()
+		clearP()
+		local all = {}
+		for _, f in ipairs(workspace:GetDescendants()) do
+			if f.Name == "TaniSel" and f:IsA("Folder") then
+				local pt = f.Parent
+				local area = pt and pt:FindFirstChild("Area")
+				if area and area:IsA("BasePart") then all[#all + 1] = { pt = pt, area = area, sel = f, off = Vector3.zero } end
+			end
+		end
+		local own = {}
+		if S.Force then
+			for _, p in ipairs(all) do if p.pt == S.Force then own[1] = p end end
+		else
+			for _, p in ipairs(all) do if petakMine(p.pt) then own[#own + 1] = p end end
+		end
+		if #own == 0 then status = "Petak milikmu belum terdeteksi: tekan 'Petak Terdekat'" end
+		for i, P in ipairs(own) do
+			P.id = i
+			table.insert(pconns, P.sel.ChildAdded:Connect(function(c)
+				if not legacy() and (os.clock() < tillUntil or isTilled(c)) then
+					tilled[c] = true
+				else
+					addTick = addTick + 1
+					plantT[c] = os.clock()
+					if curKey then plantKey[c] = curKey end
+				end
+				table.insert(pconns, c.AttributeChanged:Connect(mark))
+				mark()
+			end))
+			table.insert(pconns, P.sel.ChildRemoved:Connect(mark))
+			table.insert(pconns, P.sel.DescendantAdded:Connect(mark))
+			table.insert(pconns, P.sel.DescendantRemoving:Connect(mark))
+			for _, c in ipairs(P.sel:GetChildren()) do table.insert(pconns, c.AttributeChanged:Connect(mark)) end
+		end
+		Ps = own
+		table.clear(cool) table.clear(failUntil) table.clear(fails)
+		mark()
+	end
+
+	bind(CS:GetInstanceAddedSignal("PromptTani"), mark)
+	bind(CS:GetInstanceRemovedSignal("PromptTani"), mark)
+	bind(LP.CharacterAdded, function() task.wait(1) mark() end)
+
+	-- ===== klasifikasi =====
+	local cats = {
+		{ "Goyang", { "goyang" }, 0.5 },
+		{ "Tebang", { "tebang", "tebas", "kapak" }, 2 },
+		{ "Petik",  { "petik" }, Cfg.DURASI.Petik },
+		{ "Pungut", { "pungut", "ambil" }, Cfg.DURASI.Pungut },
+		{ "Panen",  { "panen", "cabut", "tuai", "sabit", "ikat", "ketam" }, Cfg.DURASI.Cabut },
+		{ "Siram",  { "siram" }, 1 },
+	}
+	local function classify(p)
+		local txt = ((p.ActionText or "") .. " " .. (p.ObjectText or "") .. " " .. p.Name):lower()
+		for _, c in ipairs(cats) do
+			for _, k in ipairs(c[2]) do
+				if txt:find(k, 1, true) then return c[1], c[3] end
+			end
+		end
+		return "Lain", 1
+	end
+	local function promptPart(p)
+		local a = p.Parent
+		if a and a:IsA("BasePart") then return a end
+		if a and a:IsA("Attachment") then return a.Parent end
+		return a and a:FindFirstChildWhichIsA("BasePart", true)
+	end
+
+	local labels = {
+		Goyang = { "GOYANG", Color3.fromRGB(255, 170, 60) },
+		Tebang = { "TEBANG", Color3.fromRGB(235, 60, 50) },
+		Petik  = { "PETIK", Color3.fromRGB(255, 225, 80) },
+		Pungut = { "PUNGUT", Color3.fromRGB(255, 225, 80) },
+		Panen  = { "SIAP PANEN", Color3.fromRGB(90, 235, 90) },
+		Siram  = { "SIRAM", Color3.fromRGB(90, 200, 255) },
+		Lain   = { "AKSI", Color3.fromRGB(220, 220, 220) },
+	}
+	local prio = { Tebang = 1, Panen = 2, Petik = 3, Pungut = 4, Goyang = 5 }
+	local stageTxt = { rata = "TANAH RATA", gembur = "TANAH GEMBUR", gundukan = "GUNDUKAN" }
+	local MOUND_H = 0.8
+
+	local function totalTime(name)
+		local ln = (name or ""):lower()
+		for k, v in pairs(Cfg.TANAMAN or {}) do
+			if ln:find(k:lower(), 1, true) and v.tahap then return v.tahap[#v.tahap] end
+		end
+		local b = Cfg.BIBIT and Cfg.BIBIT[S.Bibit]
+		local t = b and Cfg.TANAMAN and Cfg.TANAMAN[b.jenis]
+		return (t and t.tahap and t.tahap[#t.tahap]) or 540
+	end
+
+	-- ===== analisis (hanya saat ada update) =====
+	local function analyze()
+		local padi = not legacy()
+		local list, set = {}, {}
+		local function add(p)
+			if p:IsA("ProximityPrompt") and not set[p] and p.Parent then
+				set[p] = true
+				list[#list + 1] = p
+				if not hooked[p] then
+					hooked[p] = true
+					table.insert(pconns, p.AttributeChanged:Connect(mark))
+					table.insert(pconns, p.AncestryChanged:Connect(mark))
+					table.insert(pconns, p:GetPropertyChangedSignal("ActionText"):Connect(mark))
+					table.insert(pconns, p:GetPropertyChangedSignal("ObjectText"):Connect(mark))
+				end
+			end
+		end
+		for _, p in ipairs(CS:GetTagged("PromptTani")) do add(p) end
+		for _, P in ipairs(Ps) do
+			for _, o in ipairs(P.sel:GetDescendants()) do add(o) end
+		end
+
+		local acts, empties, emptyKeys, esp = {}, {}, {}, {}
+		local n = { kosong = 0, siap = 0, tumbuh = 0, tebang = 0 }
+
+		for _, P in ipairs(Ps) do
+			if P.area.Parent then
+				local cf, sz = P.area.CFrame, P.area.Size
+				local m = 1 - S.Margin
+				local sp = math.min(sz.X, sz.Z) * m / N
+				local top = cf:PointToWorldSpace(Vector3.new(0, sz.Y / 2, 0)).Y
+				local cells, byKey = {}, {}
+				for i = 0, N - 1 do
+					for j = 0, N - 1 do
+						local lx = ((i + 0.5) / N - 0.5) * sz.X * m
+						local lz = ((j + 0.5) / N - 0.5) * sz.Z * m
+						local c = {
+							key = P.id .. "_" .. i .. "_" .. j, P = P, top = top, prompts = {},
+							pos = cf:PointToWorldSpace(Vector3.new(lx, sz.Y / 2, lz)) + P.off,
+						}
+						cells[#cells + 1] = c
+						byKey[c.key] = c
+					end
+				end
+				local function nearest(pos)
+					local bc, bd
+					for _, c in ipairs(cells) do
+						local d = d2(c.pos, pos)
+						if not bd or d < bd then bc, bd = c, d end
+					end
+					return bc, bd
+				end
+
+				-- tanaman -> sel (+ kalibrasi offset otomatis)
+				local plants, ox, oz, cnt = {}, 0, 0, 0
+				for _, c in ipairs(P.sel:GetChildren()) do
+					local ok, pos = pcall(posOf, c)
+					if ok and pos and not (padi and isTilled(c)) then
+						plants[#plants + 1] = { inst = c, pos = pos }
+					end
+				end
+				for _, pl in ipairs(plants) do
+					if not plantKey[pl.inst] then
+						local bc, bd = nearest(pl.pos)
+						if bc and bd < sp * 0.6 then
+							ox += pl.pos.X - bc.pos.X
+							oz += pl.pos.Z - bc.pos.Z
+							cnt += 1
+						end
+					end
+				end
+				if cnt > 0 then
+					local lim = sp * 0.3
+					local dx, dz = math.clamp(ox / cnt, -lim, lim), math.clamp(oz / cnt, -lim, lim)
+					P.off = P.off + Vector3.new(dx, 0, dz)
+					for _, c in ipairs(cells) do c.pos = c.pos + Vector3.new(dx, 0, dz) end
+				end
+				for _, pl in ipairs(plants) do
+					local bc = plantKey[pl.inst] and byKey[plantKey[pl.inst]]
+					if not bc then
+						local b2, bd = nearest(pl.pos)
+						if b2 and bd < sp * 0.9 then bc = b2 end
+					end
+					if bc and not bc.plant then bc.plant = pl.inst end
+				end
+
+				-- deteksi gundukan dari tinggi permukaan
+				local rp = RaycastParams.new()
+				rp.FilterType = Enum.RaycastFilterType.Exclude
+				rp.FilterDescendantsInstances = { LP.Character, anchors, P.sel }
+				local base
+				for _, c in ipairs(cells) do
+					local hit = workspace:Raycast(c.pos + Vector3.new(0, 12, 0), Vector3.new(0, -40, 0), rp)
+					if hit then
+						c.h = hit.Position.Y - top
+						base = base and math.min(base, c.h) or c.h
+					end
+				end
+				base = math.min(base or 0, 0)
+				for _, c in ipairs(cells) do
+					c.mound = c.h ~= nil and (c.h - base) > MOUND_H
+				end
+
+				-- prompt -> sel
+				for _, p in ipairs(list) do
+					if p.Parent and ownerOk(p) then
+						local part = promptPart(p)
+						if part then
+							local lp = cf:PointToObjectSpace(part.Position)
+							if math.abs(lp.X) <= sz.X / 2 + 12 and math.abs(lp.Z) <= sz.Z / 2 + 12 and math.abs(lp.Y) <= 40 then
+								local cat, dur = classify(p)
+								local guess = false
+								if cat == "Lain" then
+									local txt = ((p.ActionText or "") .. " " .. (p.ObjectText or "")):lower()
+									local inSel = p:IsDescendantOf(P.sel) or CS:HasTag(p, "PromptTani")
+									if inSel and not txt:find("tumbuh", 1, true) and not txt:find("%d+%s*%%") then
+										cat, dur, guess = "Panen", Cfg.DURASI.Cabut or 2.8, true
+									end
+								end
+								local a = { p = p, pos = part.Position, part = part, cat = cat, dur = dur, top = top, P = P, guess = guess }
+								local live = p:GetAttribute("Aktif") ~= false and labels[cat] and cat ~= "Lain"
+								local bc, bd = nearest(part.Position)
+								if live then acts[#acts + 1] = a end
+								if bc and bd <= sp * 0.9 then
+									table.insert(bc.prompts, a)
+								elseif live then
+									local lb = labels[cat]
+									esp[#esp + 1] = { key = p, pos = part.Position, text = lb[1], color = lb[2] }
+									if cat == "Tebang" then n.tebang += 1 elseif cat ~= "Siram" then n.siap += 1 end
+								end
+							end
+						end
+					end
+				end
+
+				-- status sel
+				for _, c in ipairs(cells) do
+					local bestA
+					for _, a in ipairs(c.prompts) do
+						if a.p:GetAttribute("Aktif") ~= false and prio[a.cat] and (not bestA or prio[a.cat] < prio[bestA.cat]) then bestA = a end
+					end
+					if bestA then
+						local lb = labels[bestA.cat]
+						local txt = lb[1]
+						if bestA.guess then txt = txt .. " [" .. tostring(bestA.p.ActionText) .. "]" end
+						esp[#esp + 1] = { key = c.key, pos = c.pos, text = txt, color = lb[2] }
+						if bestA.cat == "Tebang" then n.tebang += 1 else n.siap += 1 end
+						soil[c.key] = nil
+					elseif c.plant or #c.prompts > 0 then
+						n.tumbuh += 1
+						soil[c.key] = nil
+						local pct
+						for _, a in ipairs(c.prompts) do
+							local t = (a.p.ActionText or "") .. " " .. (a.p.ObjectText or "")
+							local pc = t:match("(%d+)%s*%%")
+							if pc then pct = tonumber(pc) break end
+						end
+						if not pct and c.plant and plantT[c.plant] then
+							pct = math.floor(math.min(99, (os.clock() - plantT[c.plant]) / totalTime(c.plant.Name) * 100))
+						end
+						esp[#esp + 1] = {
+							key = c.key, pos = c.pos,
+							text = pct and ("TUMBUH " .. pct .. "%") or "TUMBUH",
+							color = Color3.fromRGB(170, 210, 120),
+						}
+					else
+						n.kosong += 1
+						empties[#empties + 1] = c
+						emptyKeys[c.key] = true
+						local s = soil[c.key]
+						if c.mound and (not s or (s.stage == "rata" and os.clock() - s.t > 3)) then
+							s = getSoil(c.key)
+							setStage(s, "gundukan")
+						end
+						local txt = stageTxt[s and s.stage or "rata"]
+						if s and s.hits > 0 then txt = txt .. " (" .. s.hits .. "x)" end
+						esp[#esp + 1] = { key = c.key, pos = c.pos, text = txt, color = Color3.fromRGB(80, 170, 255) }
+					end
+				end
+			end
+		end
+		D.acts, D.empties, D.emptyKeys, D.esp, D.n = acts, empties, emptyKeys, esp, n
+	end
+
+	local function refresh()
+		if dirty then
+			dirty = false
+			local ok, err = pcall(analyze)
+			if not ok then warn("[AutoTani analyze]", err) end
+		end
+	end
+
+	-- ===== ESP =====
+	local cache = {}
+
+	local function espClear(seen)
+		for k, e in pairs(cache) do
+			if not seen or not seen[k] then
+				pcall(function() e.part:Destroy() e.bb:Destroy() e.box:Destroy() end)
+				cache[k] = nil
+			end
+		end
+	end
+
+	task.spawn(function()
+		while S.Run do
+			if S.ESP then
+				local seen = {}
+				for i, t in ipairs(D.esp) do
+					if i > 150 then break end
+					seen[t.key] = true
+					local e = cache[t.key]
+					if not e then
+						local part = Instance.new("Part")
+						part.Anchored, part.CanCollide, part.CanQuery, part.CanTouch = true, false, false, false
+						part.Transparency, part.Size = 1, Vector3.new(1, 1, 1)
+						part.Parent = anchors
+						local bb = Instance.new("BillboardGui")
+						bb.Adornee, bb.AlwaysOnTop = part, true
+						bb.Size = UDim2.fromOffset(190, 18)
+						bb.StudsOffset = Vector3.new(0, 3, 0)
+						bb.Parent = espGui
+						local lb = Instance.new("TextLabel")
+						lb.Size = UDim2.fromScale(1, 1)
+						lb.BackgroundTransparency = 1
+						lb.Font = Enum.Font.GothamBold
+						lb.TextSize = 12
+						lb.TextStrokeTransparency = 0
+						lb.Parent = bb
+						local box = Instance.new("BoxHandleAdornment")
+						box.Adornee, box.AlwaysOnTop, box.ZIndex = part, true, 1
+						box.Size = Vector3.new(3, 0.3, 3)
+						box.Transparency = 0.5
+						box.Parent = espGui
+						e = { part = part, bb = bb, lb = lb, box = box }
+						cache[t.key] = e
+					end
+					e.part.Position = t.pos
+					e.lb.Text = t.text
+					e.lb.TextColor3 = t.color
+					e.box.Color3 = t.color
+				end
+				espClear(seen)
+			else
+				espClear(nil)
+			end
+			task.wait(0.4)
+		end
+	end)
+
+	-- ===== goyang otomatis =====
+	if getconnections then
+		pcall(function()
+			for _, c in ipairs(getconnections(Aksi.OnClientEvent)) do
+				c:Disable()
+				table.insert(S.Native, c)
+			end
+		end)
+	end
+
+	bind(Aksi.OnClientEvent, function(act, data)
+		if act ~= "goyangMulai" or not S.Goyang or typeof(data) ~= "table" then return end
+		task.spawn(function()
+			goyangBusy = true
+			local fs = task.delay(15, function() goyangBusy = false end)
+			local r = hrp()
+			if r and typeof(data.batang) == "Vector3" then
+				local dir = unit(r.Position - data.batang, Vector3.new(0, 0, 1))
+				tpTo(data.batang + dir * Cfg.GOYANG.JARAK_BATANG, data.batang, nil)
+			end
+			task.wait(0.3)
+			Aksi:FireServer("goyang", data.token, true)
+			task.wait(Cfg.DURASI.Goyang or 3)
+			pcall(task.cancel, fs)
+			goyangBusy = false
+			mark()
+		end)
+	end)
+
+	task.spawn(function()
+		while S.Run do
+			local g = PG:FindFirstChild("GoyangPohonGui")
+			if g and S.Goyang then g.Enabled = false end
+			task.wait(0.1)
+		end
+	end)
+
+	-- ===== aksi =====
+	local function firePrompt(p)
+		p.Enabled = true
+		p.HoldDuration = 0
+		p.RequiresLineOfSight = false
+		if fireproximityprompt then
+			pcall(fireproximityprompt, p)
+		else
+			pcall(function() p:InputHoldBegin() task.wait(0.05) p:InputHoldEnd() end)
+		end
+	end
+
+	local function doPrompt(a)
+		local p, cat = a.p, a.cat
+		local r = hrp()
+		local dir = unit(r.Position - a.pos, a.P.area.CFrame.RightVector)
+		tpTo(a.pos + dir * 2.2, a.pos, a.top)
+		task.wait(0.25)
+		local now = os.clock()
+		fails[p] = (fails[p] or 0) + 1
+		if fails[p] > 6 then
+			cool[p] = now + 60
+			fails[p] = 0
+		else
+			cool[p] = now + (cat == "Goyang" and 14 or cat == "Siram" and 60 or 3)
+		end
+		firePrompt(p)
+		task.wait(0.25)
+		if cat == "Goyang" then
+			local t0 = os.clock()
+			while not goyangBusy and os.clock() - t0 < 2 do task.wait(0.05) end
+			while goyangBusy and os.clock() - t0 < 15 do task.wait(0.1) end
+		else
+			task.wait((a.dur or 1) + 0.15)
+			if cat ~= "Siram" and p.Parent and p:GetAttribute("Aktif") ~= false then
+				pcall(function() p:InputHoldBegin() task.wait(0.1) p:InputHoldEnd() end)
+				task.wait(0.4)
+			else
+				fails[p] = 0
+			end
+		end
+	end
+
+	-- ===== baca keterangan game =====
+	local hoeInfo = { gembur = nil, jadi = nil, rata = nil }
+
+	local function parseText(s)
+		if type(s) ~= "string" or s == "" then return end
+		local l = s:lower()
+		if l:find("tanah gembur", 1, true) then hoeInfo.gembur = os.clock() end
+		if l:find("gundukan jadi", 1, true) then hoeInfo.jadi = os.clock() end
+		local a, b = l:match("meratakan gundukan%s*(%d+)%s*/%s*(%d+)")
+		if a and tonumber(a) >= tonumber(b) then hoeInfo.rata = os.clock() end
+		local nm, n = l:match("bibit%s+(%a+)%s+ditanam.-cangkul gundukan ini%s+(%d+)%s+kali")
+		if nm and n and nm ~= "pisang" then
+			HOE["Bibit " .. nm:sub(1, 1):upper() .. nm:sub(2)] = tonumber(n)
+		end
+	end
+
+	local function watch(o)
+		if o:IsA("TextLabel") or o:IsA("TextButton") then
+			bind(o:GetPropertyChangedSignal("Text"), function() parseText(o.Text) end)
+		end
+	end
+
+	task.spawn(function()
+		for _, o in ipairs(PG:GetDescendants()) do watch(o) end
+		bind(PG.DescendantAdded, function(o)
+			watch(o)
+			if o:IsA("TextLabel") or o:IsA("TextButton") then task.defer(parseText, o.Text) end
+		end)
+	end)
+
+	bind(Aksi.OnClientEvent, function(...)
+		for _, v in ipairs({ ... }) do
+			if type(v) == "string" then
+				parseText(v)
+			elseif type(v) == "table" then
+				for _, x in pairs(v) do if type(x) == "string" then parseText(x) end end
+			end
+		end
+	end)
+
+	-- ===== CANGKUL BERBASIS MEMORI SEL =====
+	local function hoeCell(c, target, bibit)
+		local s = getSoil(c.key)
+		if s.stage == target then return true end
+		if not (S.Cangkul and equip(Cfg.ALAT_CANGKUL)) then return false end
+		local g = gen
+		local startT = os.clock()
+		local loops = 0
+		if target == "gembur" then tillUntil = os.clock() + 99 end
+		while S.Aktif and g == gen and loops < 8 and s.stage ~= target do
+			status = ("Cangkul sel (%s, %dx)"):format(stageTxt[s.stage], s.hits + 1)
+			Aksi:FireServer("cangkul")
+			loops += 1
+			s.hits += 1
+			task.wait(Cfg.DURASI.Cangkul + 0.15)
+			if hoeInfo.jadi and hoeInfo.jadi >= startT then
+				hoeInfo.jadi = nil
+				setStage(s, "gundukan")
+			elseif hoeInfo.gembur and hoeInfo.gembur >= startT then
+				hoeInfo.gembur = nil
+				setStage(s, "gembur")
+			elseif hoeInfo.rata and hoeInfo.rata >= startT then
+				hoeInfo.rata = nil
+				setStage(s, "rata")
+			elseif target == "gembur" and s.stage == "rata" and s.hits >= hoeCount(bibit) then
+				setStage(s, "gembur")
+			end
+			dirty = true
+		end
+		if target == "gembur" then
+			tillUntil = os.clock() + 1.5
+			task.wait(1.6)
+		else
+			tillUntil = 0
+			task.wait(0.4)
+		end
+		if g ~= gen then return false end
+		if s.stage ~= target then
+			s.tries = (s.tries or 0) + 1
+			if s.tries >= 2 then
+				setStage(s, target)
+				s.tries = 0
+			end
+		else
+			s.tries = 0
+		end
+		dirty = true
+		return s.stage == target
+	end
+
+	local function tryPlant(bibit)
+		if bibit ~= S.Bibit then return nil end
+		if not equip(bibit) then return nil end
+		local g = gen
+		local before, t0 = addTick, os.clock()
+		Aksi:FireServer("tanam")
+		while os.clock() - t0 < Cfg.DURASI.Tanam + 1.5 and addTick == before and S.Aktif and g == gen do task.wait(0.05) end
+		local ok = addTick ~= before
+		local rest = Cfg.DURASI.Tanam + 0.1 - (os.clock() - t0)
+		if rest > 0 then task.wait(rest) end
+		return ok
+	end
+
+	local function afterPlant(c, ok)
+		if ok then
+			soil[c.key] = nil
+		else
+			local s = getSoil(c.key)
+			setStage(s, "rata")
+			failUntil[c.key] = os.clock() + 10
+		end
+		dirty = true
+		refresh()
+	end
+
+	local function moundCell(c, bibit)
+		hoeCell(c, "gundukan", bibit)
+	end
+
+	local function seedCell(c, bibit)
+		local g = gen
+		curKey = c.key
+		local ok = tryPlant(bibit)
+		curKey = nil
+		if g ~= gen or bibit ~= S.Bibit then return end
+		if ok == nil then
+			status = "Bibit habis: " .. bibit
+			failUntil[c.key] = os.clock() + 5
+			return
+		end
+		afterPlant(c, ok)
+	end
+
+	local function plantPadi(c, bibit)
+		local g = gen
+		if S.Cangkul and getSoil(c.key).stage ~= "gembur" then
+			hoeCell(c, "gembur", bibit)
+			if g ~= gen then return end
+		end
+		curKey = c.key
+		local ok = tryPlant(bibit)
+		curKey = nil
+		if g ~= gen or bibit ~= S.Bibit then return end
+		if ok == nil then
+			status = "Bibit habis: " .. bibit
+			failUntil[c.key] = os.clock() + 5
+			return
+		end
+		afterPlant(c, ok)
+	end
+
+	local function plantAt(c, phase)
+		local bibit = S.Bibit
+		local g = gen
+		local look = unit(c.P.area.CFrame.LookVector, Vector3.new(0, 0, -1))
+		tpTo(c.pos - look * DEPAN, c.pos, c.top)
+		task.wait(0.3)
+		if g ~= gen then return end
+		if legacy(bibit) then
+			if phase == "cangkul" then moundCell(c, bibit) else seedCell(c, bibit) end
+		else
+			plantPadi(c, bibit)
+		end
+	end
+
+	local function nearestEmpty(r, now, pred)
+		local bc, bd
+		for _, c in ipairs(D.empties) do
+			if (failUntil[c.key] or 0) < now and pred(c) then
+				local d = d2(c.pos, r.Position)
+				if not bd or d < bd then bc, bd = c, d end
+			end
+		end
+		return bc
+	end
+
+	local function step()
+		local r = hrp()
+		local now = os.clock()
+		local best, bd
+		for _, a in ipairs(D.acts) do
+			local p = a.p
+			if p.Parent and S[a.cat] and p:GetAttribute("Aktif") ~= false and (cool[p] or 0) < now then
+				local d = (a.pos - r.Position).Magnitude + (a.cat == "Siram" and 1000 or 0)
+				if not bd or d < bd then best, bd = a, d end
+			end
+		end
+		if best then
+			status = "Aksi: " .. best.cat
+			doPrompt(best)
+			return true
+		end
+
+		if legacy(S.Bibit) then
+			if S.Cangkul then
+				local c = nearestEmpty(r, now, function(c) return getSoil(c.key).stage ~= "gundukan" end)
+				if c then
+					status = "Fase 1: Cangkul"
+					plantAt(c, "cangkul")
+					return true
+				end
+			end
+			if S.Tanam then
+				local c = nearestEmpty(r, now, function(c) return getSoil(c.key).stage == "gundukan" or not S.Cangkul end)
+				if c then
+					if not findTool(S.Bibit) then
+						status = "Bibit habis: " .. S.Bibit
+						return false
+					end
+					status = "Fase 2: Tanam"
+					plantAt(c, "tanam")
+					return true
+				end
+			end
+		elseif S.Tanam then
+			local c = nearestEmpty(r, now, function() return true end)
+			if c then
+				if not findTool(S.Bibit) then
+					status = "Bibit habis: " .. S.Bibit
+					return false
+				end
+				status = "Menanam (" .. S.Bibit .. ")"
+				plantAt(c)
+				return true
+			end
+		end
+		status = (#Ps == 0) and status or "Semua penuh, menunggu update"
+		return false
+	end
+
+	task.spawn(function()
+		reload()
+		local last = os.clock()
+		while S.Run do
+			if os.clock() - last > 2 then dirty = true last = os.clock() end
+			refresh()
+			if S.Aktif and alive() and not goyangBusy and #Ps > 0 then
+				local ok, res = pcall(step)
+				if not ok then
+					warn("[AutoTani]", res)
+					task.wait(1)
+				elseif res then
+					dirty = true
+				else
+					task.wait(0.25)
+				end
+			else
+				task.wait(0.25)
+			end
+			task.wait()
+		end
+	end)
+
+	-- ===== DUMP PROMPT (debug, hasil di F9) =====
+	local function dumpPrompts()
+		print("=== DUMP PROMPT PETAK ===")
+		for _, p in ipairs(CS:GetTagged("PromptTani")) do
+			if p:IsA("ProximityPrompt") then
+				local at = {}
+				for k, v in pairs(p:GetAttributes()) do at[#at + 1] = k .. "=" .. tostring(v) end
+				local cat = classify(p)
+				print(("[%s] Action='%s' Object='%s' Enabled=%s Hold=%s cat=%s attr={%s} %s"):format(
+					p.Name, tostring(p.ActionText), tostring(p.ObjectText), tostring(p.Enabled),
+					tostring(p.HoldDuration), cat, table.concat(at, ","), p:GetFullName()))
+			end
+		end
+		for _, P in ipairs(Ps) do
+			for _, c in ipairs(P.sel:GetChildren()) do
+				print("TaniSel child:", c.Name, c.ClassName)
+			end
+		end
+	end
+
+	-- ===== API untuk UI =====
+	local M = { S = S, Seeds = Cfg.URUT_BIBIT or { "Bibit Padi", "Bibit Pisang" } }
+	function M.SetActive(v) S.Aktif = v and true or false mark() end
+	function M.IsActive() return S.Aktif end
+	function M.Kill() S.Stop() end
+	function M.Info()
+		local n = D.n
+		return ("%s\nPetak: %d | Belum ditanam: %d\nSiap panen/petik: %d | Tumbuh: %d | Tebang: %d"):format(
+			status, #Ps, n.kosong, n.siap, n.tumbuh, n.tebang)
+	end
+	function M.CariUlang() S.Force = nil reload() end
+	function M.PetakTerdekat()
+		local all = {}
+		for _, f in ipairs(workspace:GetDescendants()) do
+			if f.Name == "TaniSel" and f:IsA("Folder") then
+				local pt = f.Parent
+				local area = pt and pt:FindFirstChild("Area")
+				if area and area:IsA("BasePart") then all[#all + 1] = { pt = pt, area = area } end
+			end
+		end
+		local n = nearestPetak(all)
+		if n then S.Force = n.pt reload() end
+	end
+	function M.SetMargin(v)
+		S.Margin = math.clamp(v, 0, 0.25)
+		for _, P in ipairs(Ps) do P.off = Vector3.zero end
+		mark()
+	end
+	function M.ResetMemori()
+		gen += 1
+		table.clear(soil) table.clear(failUntil) table.clear(cool) table.clear(fails)
+		mark()
+	end
+	function M.Dump() dumpPrompts() end
+	function M.SetBibit(n)
+		if S.Bibit == n then return end
+		gen += 1
+		S.Bibit = n
+		table.clear(failUntil) table.clear(cool) table.clear(fails)
+		tillUntil = 0
+		hoeInfo.jadi, hoeInfo.gembur, hoeInfo.rata = nil, nil, nil
+		for _, s in pairs(soil) do s.hits, s.tries = 0, 0 end
+		mark()
+	end
+	function M.Mark() mark() end
+	return M
+end
+
+--====================================================================
+-- MODUL 3: AUTO TERNAK
+--====================================================================
+local function ModTernak()
+	local Ternak = RS:WaitForChild("Ternak", 5)
+	local TernakProxy = workspace:WaitForChild("TernakProxy", 5)
+	if not (Ternak and TernakProxy) then return nil, "Sistem Ternak tidak ditemukan di game ini" end
+	local Cfg = require(Ternak:WaitForChild("TernakConfig"))
+	local Remotes = Ternak:WaitForChild("Remotes")
+	local Ternak_Arit = Remotes:WaitForChild("Ternak_Arit")
+	local Terrain = workspace.Terrain
+
+	local S = {
+		ALIVE = true, AUTO = false, TPL = {}, STATUS = "idle",
+		BATAS_LAPAR = Cfg.LAPAR_BATAS + 15,
+		STOK_MIN = 24, STOK_TARGET = 72,
+		KAP = Cfg.STOK.SLOT * Cfg.STOK.PER_SLOT, PER_SLOT = Cfg.STOK.PER_SLOT,
+		PAKAN_MIN = 15, PAKAN_TARGET = 95,
+		PAKAN_MODE = false, PAKAN_HOLD = 0, PAKAN_FAIL = 0,
+		HOP = 60, TUNGGU = 0.15,
+		MAKS_GULUNGAN = Cfg.ARIT.SABET_MAKS,
+		GESER_MIN = 7, GESER_MAKS = 18,
+		JARAK_HABIS = 8, HABIS_TTL = 300,
+		CUT = 0, STUCK = false, HABIS_T = 0, LASTPOS = nil, HABISLIST = {},
+		LIMIT = 24, PAS_T = 0,
+		KEMBALI = true, ASAL = nil,
+	}
+	local conns = {}
+	local function onT(sig, fn) local c = sig:Connect(fn) table.insert(conns, c) return c end
+
+	local function root() local c = LP.Character return c and c:FindFirstChild("HumanoidRootPart") end
+	local function hum() local c = LP.Character return c and c:FindFirstChildOfClass("Humanoid") end
+	local function bawa() return LP:GetAttribute("BawaRumput") or 0 end
+	local function tumpukan() local p = LP:GetAttribute("TumpukanPos") return typeof(p) == "Vector3" and p or nil end
+	local function posOf(i)
+		if not i then return end
+		if i:IsA("BasePart") then return i.Position end
+		if i:IsA("Attachment") then return i.WorldPosition end
+		if i:IsA("Model") then return i:GetPivot().Position end
+	end
+
+	---------------------------------------------------------------- TELEPORT
+	local function tp(pos)
+		local r = root()
+		if not r then return end
+		local target = pos + Vector3.new(0, 3, 0)
+		while S.ALIVE and (r.Position - target).Magnitude > S.HOP do
+			r.CFrame = CFrame.new(r.Position + (target - r.Position).Unit * S.HOP)
+			task.wait(S.TUNGGU)
+		end
+		r.CFrame = CFrame.new(target)
+		task.wait(S.TUNGGU)
+	end
+
+	---------------------------------------------------------------- LAHAN, LUMBUNG, KANDANG
+	local lahanCache
+	local function myLahan()
+		if lahanCache and lahanCache.Parent then return lahanCache end
+		local lobby = workspace:FindFirstChild("Lobby")
+		local lahan = lobby and lobby:FindFirstChild("Lahan")
+		if lahan then
+			for _, c in ipairs(lahan:GetChildren()) do
+				if c:GetAttribute("OwnerUserId") == LP.UserId then lahanCache = c return c end
+			end
+		end
+	end
+
+	local function kebun()
+		local l = myLahan()
+		return l and l:FindFirstChild("Kebun")
+	end
+
+	local function lumbung()
+		local k = kebun()
+		return k and k:FindFirstChild("LumbungSuket")
+	end
+
+	local function stokLumbung()
+		local lb = lumbung()
+		if not lb then return nil end
+		local paj = lb:FindFirstChild("Pajangan")
+		if not paj then
+			for _, v in pairs(lb:GetAttributes()) do
+				if type(v) == "number" then return math.min(v, S.KAP) end
+			end
+			return 0
+		end
+		local total = 0
+		for _, d in ipairs(paj:GetChildren()) do
+			if d.Name:lower():find("gulungan") then
+				local amt
+				for k, v in pairs(d:GetAttributes()) do
+					local n = k:lower()
+					if type(v) == "number" and (n:find("isi") or n:find("jumlah") or n:find("sabet") or n:find("stok") or n:find("amount")) then
+						amt = v break
+					end
+				end
+				total += math.clamp(amt or S.PER_SLOT, 0, S.PER_SLOT)
+			end
+		end
+		return math.min(total, S.KAP)
+	end
+
+	local function slotPrompts()
+		local lb = lumbung()
+		local list = {}
+		if not lb then return list end
+		for _, d in ipairs(lb:GetDescendants()) do
+			if d:IsA("ProximityPrompt") and d.Name == "PromptStok" then table.insert(list, d) end
+		end
+		return list
+	end
+
+	local function firePrompt(pr)
+		if not (pr and fireproximityprompt) then return false end
+		pcall(fireproximityprompt, pr)
+		pcall(function() pr:InputHoldBegin() task.wait(pr.HoldDuration + 0.1) pr:InputHoldEnd() end)
+		return true
+	end
+
+	---------------------------------------------------------------- PAKAN (PALUNGAN)
+	local function pakanPrompts()
+		local k = kebun()
+		local kd = k and k:FindFirstChild("Kandang")
+		local list = {}
+		if not kd then return list end
+		for _, d in ipairs(kd:GetDescendants()) do
+			if d:IsA("ProximityPrompt") and d.Name == "PromptTuang" then table.insert(list, d) end
+		end
+		return list
+	end
+
+	local KW = { "isi", "pakan", "penuh", "persen", "percent", "level", "stok", "stock", "fill", "rumput", "kenyang" }
+	local function normAttr(inst, v)
+		for k, w in pairs(inst:GetAttributes()) do
+			if type(w) == "number" then
+				local n = k:lower()
+				if (n:find("maks") or n:find("max") or n:find("kapasitas")) and w > 0 then return v / w * 100 end
+			end
+		end
+		if v <= 1 then return v * 100 end
+		return v
+	end
+
+	local function scanAttr(inst)
+		for k, v in pairs(inst:GetAttributes()) do
+			if type(v) == "number" then
+				local n = k:lower()
+				if not (n:find("owner") or n:find("userid") or n:find("maks") or n:find("max") or n:find("kapasitas")) then
+					for _, w in ipairs(KW) do
+						if n:find(w) then return normAttr(inst, v), inst.Name .. "." .. k end
+					end
+				end
+			end
+		end
+	end
+
+	local function pctOfPrompt(pr)
+		local part = pr.Parent
+		local palungan = part and part.Parent
+		for _, inst in ipairs({ part, palungan }) do
+			if inst then
+				local v, src = scanAttr(inst)
+				if v then return v, src end
+			end
+		end
+		if part then
+			for _, d in ipairs(part:GetDescendants()) do
+				local v, src = scanAttr(d)
+				if v then return v, src end
+			end
+		end
+		if palungan then
+			for _, d in ipairs(palungan:GetDescendants()) do
+				if d:IsA("TextLabel") or d:IsA("TextBox") then
+					local n = tostring(d.Text):match("(%d+%.?%d*)%s*%%")
+					if n then return tonumber(n), d:GetFullName() end
+				end
+			end
+		end
+	end
+
+	local lastPakanSrc = "-"
+	local function pakanPersen()
+		local low, src
+		for _, pr in ipairs(pakanPrompts()) do
+			local v, s = pctOfPrompt(pr)
+			if v and (not low or v < low) then low, src = v, s end
+		end
+		if src then lastPakanSrc = src end
+		return low
+	end
+
+	---------------------------------------------------------------- TERNAK LAPAR (cadangan)
+	local function ternakLapar()
+		local list = {}
+		for _, p in ipairs(TernakProxy:GetChildren()) do
+			if p:IsA("BasePart") and p:GetAttribute("Owner") == LP.UserId
+				and Cfg.jenis(p:GetAttribute("Jenis")).pakan ~= "daging"
+				and (p:GetAttribute("Kenyang") or 100) < S.BATAS_LAPAR
+				and not p:GetAttribute("Penunggang") then
+				table.insert(list, p)
+			end
+		end
+		table.sort(list, function(a, b) return (a:GetAttribute("Kenyang") or 0) < (b:GetAttribute("Kenyang") or 0) end)
+		return list
+	end
+
+	---------------------------------------------------------------- PROMPT UMUM + REMOTE PASIF
+	local function promptNear(pos, radius, patterns)
+		local best, bd
+		for _, d in ipairs(workspace:GetDescendants()) do
+			if d:IsA("ProximityPrompt") and d.Enabled and d.Name ~= "PromptStok" then
+				local pp = posOf(d.Parent)
+				if pp and (pp - pos).Magnitude <= radius then
+					local txt = (d.ActionText .. " " .. d.ObjectText .. " " .. d.Parent.Name):lower()
+					local ok = false
+					for _, p in ipairs(patterns) do if txt:find(p) then ok = true end end
+					if ok and (not bd or (pp - pos).Magnitude < bd) then best, bd = d, (pp - pos).Magnitude end
+				end
+			end
+		end
+		return best
+	end
+
+	if hookmetamethod and getnamecallmethod then
+		local old
+		old = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+			if S.ALIVE and not (checkcaller and checkcaller()) then
+				local m = getnamecallmethod()
+				if (m == "FireServer" or m == "InvokeServer") and typeof(self) == "Instance" and self.Parent == Remotes then
+					local args = table.pack(...)
+					local hasProxy = false
+					for i = 1, args.n do
+						if typeof(args[i]) == "Instance" and args[i].Parent == TernakProxy then hasProxy = true end
+					end
+					local key
+					if self.Name == "Ternak_Aksi" then
+						if hasProxy and bawa() > 0 then key = "TUANG"
+						elseif not hasProxy and tumpukan() then key = "ANGKAT" end
+					end
+					if key then S.TPL[key] = { remote = self, method = m, args = args } end
+				end
+			end
+			return old(self, ...)
+		end))
+	end
+
+	local function replay(nama, proxy, pos)
+		local t = S.TPL[nama]
+		if not t then return false end
+		local a = table.clone(t.args)
+		for i = 1, t.args.n do
+			local v = a[i]
+			if typeof(v) == "Instance" and v.Parent == TernakProxy and proxy then a[i] = proxy
+			elseif typeof(v) == "Vector3" and pos then a[i] = pos
+			elseif typeof(v) == "CFrame" and pos then a[i] = CFrame.new(pos) end
+		end
+		task.spawn(function()
+			pcall(function()
+				if t.method == "FireServer" then t.remote:FireServer(table.unpack(a, 1, t.args.n))
+				else t.remote:InvokeServer(table.unpack(a, 1, t.args.n)) end
+			end)
+		end)
+		return true
+	end
+
+	---------------------------------------------------------------- DETEKSI PESAN GAME
+	local labels = setmetatable({}, { __mode = "k" })
+	local function isHabisText(t) return type(t) == "string" and t:lower():find("sudah habis diarit") ~= nil end
+	local function isPasText(t) return type(t) == "string" and t:lower():find("tumpukan sudah pas") ~= nil end
+
+	local function cek(inst)
+		if isHabisText(inst.Text) then S.HABIS_T = os.clock() end
+		if isPasText(inst.Text) then S.PAS_T = os.clock() end
+	end
+
+	local function watch(inst)
+		if not inst:IsA("TextLabel") then return end
+		labels[inst] = true
+		cek(inst)
+		onT(inst:GetPropertyChangedSignal("Text"), function() cek(inst) end)
+	end
+	for _, d in ipairs(PG:GetDescendants()) do watch(d) end
+	onT(PG.DescendantAdded, watch)
+
+	local function habisAktif()
+		if os.clock() - S.HABIS_T < 1.2 then return true end
+		for l in pairs(labels) do
+			if l.Parent and l.Visible and l.TextTransparency < 0.9 and isHabisText(l.Text) then
+				local sg = l:FindFirstAncestorOfClass("ScreenGui")
+				if not sg or sg.Enabled then return true end
+			end
+		end
+		return false
+	end
+
+	local function pasAktif()
+		if os.clock() - S.PAS_T < 2.5 then return true end
+		for l in pairs(labels) do
+			if l.Parent and l.Visible and l.TextTransparency < 0.9 and isPasText(l.Text) then
+				local sg = l:FindFirstAncestorOfClass("ScreenGui")
+				if not sg or sg.Enabled then return true end
+			end
+		end
+		return false
+	end
+
+	onT(Ternak_Arit.OnClientEvent, function(aksi, p1, p2)
+		if aksi == "terpotong" then
+			local pemain = (typeof(p2) == "Instance" and p2) or LP
+			if pemain == LP then S.CUT += 1 end
+		end
+	end)
+
+	local function tandaiHabis(pos) table.insert(S.HABISLIST, { pos = pos, t = os.clock() }) end
+
+	local function sudahHabis(pos)
+		local now = os.clock()
+		for i = #S.HABISLIST, 1, -1 do
+			local e = S.HABISLIST[i]
+			if now - e.t > S.HABIS_TTL then
+				table.remove(S.HABISLIST, i)
+			elseif (Vector3.new(e.pos.X, 0, e.pos.Z) - Vector3.new(pos.X, 0, pos.Z)).Magnitude < S.JARAK_HABIS then
+				return true
+			end
+		end
+		return false
+	end
+
+	---------------------------------------------------------------- AUTO-WIN MINIGAME ANGKAT
+	local function guiParts()
+		local g = PG:FindFirstChild("AngkatRumputGui")
+		if not (g and g.Enabled) then return end
+		local panel = g:FindFirstChild("Panel")
+		local bar = panel and panel:FindFirstChild("Bar")
+		return g, bar and bar:FindFirstChild("Isi"), bar and bar:FindFirstChild("Berat"), g:FindFirstChild("Tombol")
+	end
+
+	local function pressClick()
+		local vs = workspace.CurrentCamera.ViewportSize
+		local x, y = vs.X * 0.5, vs.Y * 0.2
+		VIM:SendMouseButtonEvent(x, y, 0, true, game, 0)
+		task.wait(0.01)
+		VIM:SendMouseButtonEvent(x, y, 0, false, game, 0)
+	end
+
+	local function pressSpace()
+		VIM:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
+		task.wait(0.01)
+		VIM:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
+	end
+
+	local function pressButton(btn)
+		if not (btn and btn.Visible and getconnections) then return pressClick() end
+		for _, c in ipairs(getconnections(btn.Activated)) do pcall(function() c:Fire() end) end
+		for _, c in ipairs(getconnections(btn.MouseButton1Click)) do pcall(function() c:Fire() end) end
+	end
+
+	task.spawn(function()
+		local method, count, windowStart = 1, 0, 0
+		while S.ALIVE do
+			local g, isi, zona, btn = guiParts()
+			if S.AUTO and g and isi then
+				local fill = isi.Size.X.Scale
+				if count == 0 then windowStart = fill end
+
+				if method == 1 then pressClick()
+				elseif method == 2 then pressSpace()
+				else pressButton(btn) end
+				count += 1
+
+				if count >= 8 then
+					if isi.Size.X.Scale < windowStart + 0.02 then
+						method = method % 3 + 1
+						S.STATUS = "minigame: ganti metode " .. method
+					end
+					count = 0
+				end
+
+				local inZone = false
+				if zona then
+					local zs, ze = zona.Position.X.Scale, zona.Position.X.Scale + zona.Size.X.Scale
+					inZone = fill >= zs - 0.03 and fill <= ze
+				end
+				task.wait(inZone and (0.055 + math.random() * 0.02) or (0.085 + math.random() * 0.03))
+			else
+				count = 0
+				task.wait(0.1)
+			end
+		end
+	end)
+
+	---------------------------------------------------------------- NGARIT
+	local rayParams = RaycastParams.new()
+	rayParams.FilterType = Enum.RaycastFilterType.Include
+	rayParams.FilterDescendantsInstances = { Terrain }
+
+	local function grassAt(origin, minR, maxR, tries)
+		for _ = 1, tries do
+			local a, r = math.random() * math.pi * 2, minR + math.random() * (maxR - minR)
+			local from = Vector3.new(origin.X + math.cos(a) * r, origin.Y + 500, origin.Z + math.sin(a) * r)
+			local hit = workspace:Raycast(from, Vector3.new(0, -1500, 0), rayParams)
+			if hit and hit.Material == Enum.Material.Grass and not sudahHabis(hit.Position) then
+				return hit.Position
+			end
+		end
+	end
+
+	local function cariRumput()
+		local l = myLahan()
+		local pile = tumpukan()
+		local base = pile or S.LASTPOS
+
+		if base then
+			local p = grassAt(base, S.GESER_MIN, S.GESER_MAKS, 80)
+			if p then return p end
+			if pile then S.STUCK = true return end
+		end
+
+		local origins = {}
+		if root() then table.insert(origins, root().Position) end
+		if l and posOf(l) then table.insert(origins, posOf(l)) end
+
+		for pass = 1, 2 do
+			for _, r in ipairs({ 18, 40, 80, 140, 250 }) do
+				for _, o in ipairs(origins) do
+					local p = grassAt(o, 0, r, 40)
+					if p then return p end
+				end
+			end
+			if pass == 1 then table.clear(S.HABISLIST) end
+		end
+	end
+
+	local function equipArit()
+		local h = hum()
+		if not h then return end
+		local function find(c)
+			if not c then return end
+			for _, t in ipairs(c:GetChildren()) do
+				if t:IsA("Tool") and (t.Name:find("Arit") or t:GetAttribute("Sabit")) then return t end
+			end
+		end
+		local tool = find(LP.Character) or find(LP.Backpack)
+		if tool and tool.Parent ~= LP.Character then h:EquipTool(tool) task.wait(0.2) end
+		return tool
+	end
+
+	local function ngarit()
+		if S.CUT == 0 then
+			S.LIMIT = math.clamp(S.KAP - (stokLumbung() or 0), 1, S.MAKS_GULUNGAN)
+		end
+		while S.ALIVE and S.AUTO and S.CUT < S.LIMIT and bawa() <= 0 and not S.STUCK do
+			S.STATUS = ("ngarit %d/%d (stok %s)"):format(S.CUT, S.LIMIT, tostring(stokLumbung()))
+			local pos = cariRumput()
+			if not pos then
+				if not S.STUCK then S.STATUS = "Terrain Grass tidak ketemu (coba pindah dekat rumput)" task.wait(2) end
+				return
+			end
+			tp(pos)
+			S.LASTPOS = pos
+			S.HABIS_T = 0
+			task.wait(0.6)
+			if not equipArit() then S.STATUS = "Arit tidak ada" return end
+
+			local habis = false
+			for _ = 1, Cfg.ARIT.SABET_MAKS do
+				if not (S.ALIVE and S.AUTO) then return end
+				if S.CUT >= S.LIMIT then return end
+				Ternak_Arit:FireServer("sabet")
+				task.wait(Cfg.ARIT.JEDA + 0.05)
+				if pasAktif() then
+					S.STUCK = true
+					S.STATUS = "tumpukan pas -> angkat"
+					return
+				end
+				if habisAktif() then
+					tandaiHabis(pos)
+					S.STATUS = "rumput habis -> geser"
+					habis = true
+					break
+				end
+				S.STATUS = ("ngarit %d/%d (stok %s)"):format(S.CUT, S.LIMIT, tostring(stokLumbung()))
+			end
+			if not habis then tandaiHabis(pos) end
+		end
+	end
+
+	local function angkat()
+		S.STATUS = "angkat tumpukan"
+		local p = tumpukan()
+		if not p then return end
+		tp(p)
+		local pr = promptNear(p, 15, { "angkat", "rumput", "tumpuk", "ambil" })
+		if not firePrompt(pr) then replay("ANGKAT", nil, p) end
+		task.wait(0.3)
+		local g = PG:FindFirstChild("AngkatRumputGui")
+		if bawa() <= 0 and not (g and g.Enabled) then
+			pcall(function()
+				VIM:SendKeyEvent(true, Enum.KeyCode.F, false, game)
+				task.wait(0.1)
+				VIM:SendKeyEvent(false, Enum.KeyCode.F, false, game)
+			end)
+		end
+		local t = os.clock()
+		while S.ALIVE and S.AUTO and bawa() <= 0 and os.clock() - t < 25 do
+			task.wait(0.15)
+		end
+		S.CUT, S.STUCK, S.LASTPOS, S.PAS_T = 0, false, nil, 0
+	end
+
+	local function kumpulRumput()
+		if not tumpukan() then S.CUT = 0 S.STUCK = false end
+		if tumpukan() and (S.CUT >= S.LIMIT or S.STUCK) then
+			angkat()
+		else
+			ngarit()
+			if tumpukan() and (S.CUT >= S.LIMIT or S.STUCK) then angkat() end
+		end
+	end
+
+	---------------------------------------------------------------- LUMBUNG
+	local function pakaiSlot()
+		for _, pr in ipairs(slotPrompts()) do
+			if pr.Enabled then
+				local pos = posOf(pr.Parent)
+				if pos then
+					tp(pos)
+					local before, bBawa = stokLumbung(), bawa()
+					firePrompt(pr)
+					task.wait(0.8)
+					if bawa() ~= bBawa or stokLumbung() ~= before then return true end
+				end
+			end
+		end
+		return false
+	end
+
+	local function simpan() S.STATUS = "simpan ke lumbung" return pakaiSlot() end
+	local function ambilDariLumbung() S.STATUS = "ambil stok lumbung" return pakaiSlot() end
+
+	local function beriMakan(proxy)
+		S.STATUS = "kasih makan " .. tostring(proxy:GetAttribute("Nama"))
+		tp(proxy.Position)
+		local pr = promptNear(proxy.Position, 12, { "tuang", "beri", "makan", "kasih", "rumput" })
+		if not firePrompt(pr) then replay("TUANG", proxy, proxy.Position) end
+		task.wait(0.7)
+	end
+
+	---------------------------------------------------------------- ISI PAKAN (palungan)
+	local function isiPakan()
+		local prs = pakanPrompts()
+		if #prs == 0 then S.STATUS = "PromptTuang tidak ketemu" S.PAKAN_MODE = false return end
+
+		if bawa() <= 0 then
+			local stok = stokLumbung() or 0
+			if stok >= 1 and ambilDariLumbung() then return end
+			kumpulRumput()
+			return
+		end
+
+		local target
+		for _, pr in ipairs(prs) do
+			if pr.Enabled then target = pr break end
+		end
+		target = target or prs[1]
+		local pos = posOf(target.Parent)
+		if not pos then return end
+
+		local before, bBawa = pakanPersen(), bawa()
+		S.STATUS = ("isi pakan (%s%%)"):format(before and tostring(math.floor(before)) or "?")
+		tp(pos)
+		firePrompt(target)
+		task.wait(0.9)
+
+		local after = pakanPersen()
+		local berubah = (after and before and after > before + 0.3) or bawa() ~= bBawa
+		if berubah then
+			S.PAKAN_FAIL = 0
+		else
+			S.PAKAN_FAIL += 1
+			if S.PAKAN_FAIL >= 4 then
+				S.PAKAN_FAIL, S.PAKAN_MODE = 0, false
+				S.PAKAN_HOLD = os.clock() + 60
+				S.STATUS = "tuang pakan gagal, jeda 60 dtk"
+			end
+		end
+	end
+
+	---------------------------------------------------------------- LOOP UTAMA
+	task.spawn(function()
+		while S.ALIVE do
+			task.wait(0.3)
+			if S.AUTO then
+				local ok, err = pcall(function()
+					if not myLahan() then S.STATUS = "lahan tidak ketemu" return end
+					local stok = stokLumbung() or 0
+					local pk = pakanPersen()
+
+					if pk then
+						if pk <= S.PAKAN_MIN and os.clock() > S.PAKAN_HOLD then S.PAKAN_MODE = true
+						elseif pk >= S.PAKAN_TARGET then S.PAKAN_MODE = false end
+					end
+
+					local lapar = pk == nil and ternakLapar() or {}
+					local selesai = not S.PAKAN_MODE and bawa() <= 0 and #lapar == 0 and stok >= S.STOK_TARGET
+
+					if not selesai and not S.ASAL and root() then S.ASAL = root().Position end
+					if selesai then
+						if S.KEMBALI and S.ASAL then
+							S.STATUS = "selesai -> kembali ke lokasi awal"
+							local p = S.ASAL
+							S.ASAL = nil
+							tp(p)
+						end
+						S.ASAL = nil
+						S.STATUS = "idle (stok 72/72, pakan aman)"
+						return
+					end
+
+					if S.PAKAN_MODE then
+						isiPakan()
+						return
+					end
+
+					if bawa() > 0 then
+						if #lapar > 0 and stok >= S.STOK_MIN then
+							beriMakan(lapar[1])
+						elseif stok >= S.KAP then
+							S.STATUS = "lumbung penuh 72/72"
+							if #lapar > 0 then beriMakan(lapar[1]) end
+						elseif not simpan() then
+							S.STATUS = "slot penuh/prompt gagal"
+							if #lapar > 0 then beriMakan(lapar[1]) end
+						end
+					elseif stok < S.STOK_MIN then
+						kumpulRumput()
+					elseif #lapar > 0 then
+						if not ambilDariLumbung() then kumpulRumput() end
+					elseif stok < S.STOK_TARGET then
+						kumpulRumput()
+					else
+						S.STATUS = "idle (stok 72/72, pakan aman)"
+					end
+				end)
+				if not ok then warn("[AutoTernak] " .. tostring(err)) end
+			end
+		end
+	end)
+
+	---------------------------------------------------------------- API untuk UI
+	local M = { S = S }
+	function M.SetActive(v)
+		S.AUTO = v and true or false
+		if not S.AUTO then S.ASAL = nil end
+	end
+	function M.IsActive() return S.AUTO end
+	function M.Kill()
+		S.ALIVE, S.AUTO = false, false
+		for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+		table.clear(conns)
+	end
+	function M.Info()
+		local stok, pk = stokLumbung(), pakanPersen()
+		return ("Lahan: %s | Lumbung: %s\nStok: %s | Bawa: %d | Gulungan: %d/%d\nPakan: %s | Mode isi: %s\nTumpukan: %s | Titik habis: %d\nStatus: %s"):format(
+			myLahan() and "OK" or "-", lumbung() and "OK" or "-",
+			stok and (stok .. "/" .. S.KAP) or "?", bawa(), S.CUT, S.LIMIT,
+			pk and (math.floor(pk) .. "%") or "?", S.PAKAN_MODE and "ON" or "-",
+			tumpukan() and "ada" or "-", #S.HABISLIST, S.STATUS)
+	end
+	return M
+end
+
+--====================================================================
+-- MODUL 4: AUTO DULANG + LEBUR
+--====================================================================
+local function ModDulang()
+	local DRoot = RS:WaitForChild("Dulang", 5)
+	if not DRoot then return nil, "Sistem Dulang tidak ditemukan di game ini" end
+	local Cfg = require(DRoot:WaitForChild("DulangConfig"))
+	local R = DRoot:WaitForChild("Remotes")
+	local Aksi, Lebur = R:WaitForChild("Dulang_Aksi"), R:WaitForChild("Dulang_Lebur")
+
+	local running = true
+	local status = "Siap"
+	local set = { dulang = false, lebur = false, animasi = true, teleport = true, cepat = false, kaya = false, esp = true, probe = false }
+	local SKOR = { goyang = 1, kerikil = 1, bilas = 1, pungut = 1 }
+
+	-- ===== ESP endapan =====
+	local espFolder = Instance.new("Folder")
+	espFolder.Name = "EspDulang"
+	espFolder.Parent = workspace.CurrentCamera
+	local spots = {}
+
+	local function warnaSpot(label, habis)
+		label = tostring(label or "")
+		if habis then return Color3.fromRGB(140, 140, 140) end
+		if label:find("Kaya") then return Color3.fromRGB(80, 255, 100) end
+		if label:find("Sedang") then return Color3.fromRGB(255, 220, 70) end
+		return Color3.fromRGB(255, 80, 70)
+	end
+
+	local function catat(pos, label, habis)
+		local s
+		for _, v in spots do
+			if (v.pos - pos).Magnitude < 8 then s = v break end
+		end
+		if not s then
+			local p = Instance.new("Part")
+			p.Shape = Enum.PartType.Cylinder
+			p.Size = Vector3.new(0.3, Cfg.RADIUS_TITIK * 2, Cfg.RADIUS_TITIK * 2)
+			p.CFrame = CFrame.new(pos) * CFrame.Angles(0, 0, math.rad(90))
+			p.Anchored, p.CanCollide, p.CanQuery, p.CanTouch = true, false, false, false
+			p.Material = Enum.Material.Neon
+			p.Transparency = 0.7
+			p.Parent = espFolder
+
+			local bb = Instance.new("BillboardGui")
+			bb.Size = UDim2.fromOffset(160, 40)
+			bb.StudsOffset = Vector3.new(0, 6, 0)
+			bb.AlwaysOnTop = true
+			bb.Adornee = p
+			bb.Parent = p
+			local t = Instance.new("TextLabel")
+			t.Size = UDim2.fromScale(1, 1)
+			t.BackgroundTransparency = 1
+			t.Font = Enum.Font.GothamBold
+			t.TextSize = 14
+			t.TextStrokeTransparency = 0
+			t.Parent = bb
+
+			s = { pos = pos, part = p, txt = t }
+			table.insert(spots, s)
+		end
+		local w = warnaSpot(label, habis)
+		s.part.Color = w
+		s.txt.TextColor3 = w
+		s.txt.Text = tostring(label or "?") .. (habis and " (habis)" or "")
+	end
+
+	-- ===== Handler bawaan game dimatikan =====
+	local disabledConns = {}
+	if getconnections then
+		for _, sig in { Aksi.OnClientEvent, Lebur.OnClientEvent } do
+			for _, c in getconnections(sig) do
+				local ok = pcall(function() c:Disable() end)
+				if ok then table.insert(disabledConns, c) end
+			end
+		end
+	end
+
+	local S = { d = {}, l = {} }
+	local myConns = {}
+	local function listen(remote, st, isDulang)
+		table.insert(myConns, remote.OnClientEvent:Connect(function(a, data)
+			if a == "mulai" and type(data) == "table" then
+				st.data = data
+				if isDulang then
+					local h = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+					if h then catat(h.Position - Vector3.new(0, 3, 0), data.label, data.habis) end
+				end
+			elseif a == "hasil" and type(data) == "table" then
+				st.hasil = data
+			elseif a == "batal" then
+				st.batal = true
+			end
+		end))
+	end
+	listen(Aksi, S.d, true)
+	listen(Lebur, S.l, false)
+
+	local function reset(st) st.data, st.hasil, st.batal = nil, nil, false end
+	local function tunggu(st, key, timeout)
+		local t = os.clock()
+		while running and not st[key] and not st.batal and os.clock() - t < timeout do task.wait() end
+		return st[key]
+	end
+
+	local function dur(normal, min)
+		if set.cepat then return min + 0.1 end
+		return normal
+	end
+
+	local function hrpGet()
+		return LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+	end
+	local function humGet()
+		return LP.Character and LP.Character:FindFirstChildOfClass("Humanoid")
+	end
+
+	local function equip()
+		local char = LP.Character
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		if not hum or hum.Health <= 0 then return false end
+		for _, c in char:GetChildren() do
+			if c:IsA("Tool") and c:GetAttribute("DulangTingkat") then return true end
+		end
+		for _, t in LP.Backpack:GetChildren() do
+			if t:IsA("Tool") and t:GetAttribute("DulangTingkat") then
+				hum:EquipTool(t)
+				task.wait(set.cepat and 0.15 or 0.4)
+				return true
+			end
+		end
+		return false
+	end
+
+	-- ===== Animasi karakter =====
+	local tracks, lastChar = {}, nil
+	local LOOP = { Goyang = true, Bilas = true, IdleJongkok = true, PegangJalan = true }
+	local PRI = {
+		PegangJalan = Enum.AnimationPriority.Action,
+		IdleJongkok = Enum.AnimationPriority.Action,
+		AmbilTanah = Enum.AnimationPriority.Action2,
+		Goyang = Enum.AnimationPriority.Action2,
+		Bilas = Enum.AnimationPriority.Action2,
+		BuangKerikil = Enum.AnimationPriority.Action3,
+		PungutEmas = Enum.AnimationPriority.Action3,
+	}
+
+	local function getTrack(nama)
+		local id = Cfg.ANIM[nama]
+		local hum = humGet()
+		local animator = hum and hum:FindFirstChildOfClass("Animator")
+		if not (id and animator) then return nil end
+		if lastChar ~= LP.Character then tracks, lastChar = {}, LP.Character end
+		if tracks[nama] then return tracks[nama] end
+		local a = Instance.new("Animation")
+		a.AnimationId = id
+		local ok, t = pcall(function() return animator:LoadAnimation(a) end)
+		if not ok or not t then return nil end
+		t.Priority = PRI[nama] or Enum.AnimationPriority.Action2
+		t.Looped = LOOP[nama] == true
+		tracks[nama] = t
+		return t
+	end
+
+	local function play(nama)
+		for n, t in tracks do
+			if n ~= "IdleJongkok" and n ~= "PegangJalan" and n ~= nama and t.IsPlaying then
+				t:Stop(0.1)
+			end
+		end
+		local t = getTrack(nama)
+		if t then
+			if t.IsPlaying then t:Stop(0) end
+			t:Play(0.1)
+		end
+		return t
+	end
+
+	local function stopAllAnim()
+		for _, t in tracks do
+			if t.IsPlaying then t:Stop(0.15) end
+		end
+	end
+
+	-- ===== Cari titik air di zona mendulang =====
+	local titikAir, idxAir, asalCF = {}, 0, nil
+
+	local function scanAir()
+		titikAir = {}
+		local c, u = Cfg.ZONA_PUSAT, Cfg.ZONA_UKURAN
+		local reg = Region3.new(c - u / 2, c + u / 2):ExpandToGrid(4)
+		local ok, mats, occ = pcall(function() return workspace.Terrain:ReadVoxels(reg, 4) end)
+		if not ok then return end
+		local size = mats.Size
+		local min = reg.CFrame.Position - reg.Size / 2
+		for x = 1, size.X do
+			for z = 1, size.Z do
+				for y = size.Y, 1, -1 do
+					if mats[x][y][z] == Enum.Material.Water and occ[x][y][z] > 0.5 then
+						local bawah = y > 1 and mats[x][y - 1][z] == Enum.Material.Water
+						if bawah then
+							table.insert(titikAir, min + Vector3.new((x - 0.5) * 4, (y - 0.5) * 4, (z - 0.5) * 4))
+						end
+						break
+					end
+				end
+			end
+		end
+		for i = #titikAir, 2, -1 do
+			local j = math.random(i)
+			titikAir[i], titikAir[j] = titikAir[j], titikAir[i]
+		end
+	end
+
+	local function keAir(lompat)
+		local hrp = hrpGet()
+		if not hrp then return false end
+		if #titikAir == 0 then scanAir() end
+		if #titikAir == 0 then titikAir = { Cfg.ZONA_PUSAT } end
+		if not asalCF then asalCF = hrp.CFrame end
+		if lompat then idxAir = idxAir % #titikAir + 1 end
+		idxAir = math.max(idxAir, 1)
+		hrp.AssemblyLinearVelocity = Vector3.zero
+		hrp.CFrame = CFrame.new(titikAir[idxAir] + Vector3.new(0, 1.5, 0))
+		task.wait(set.cepat and 0.3 or 0.8)
+		return true
+	end
+
+	local function kembali()
+		local hrp = hrpGet()
+		if hrp and asalCF then hrp.CFrame = asalCF end
+		asalCF = nil
+	end
+
+	-- ===== Siklus dulang =====
+	local FASE_ANIM = {
+		{ "AmbilTanah", 2.0 },
+		{ "Goyang", 6.5 },
+		{ "BuangKerikil", 4.5 },
+		{ "Bilas", 8.5 },
+		{ "PungutEmas", 5.0 },
+	}
+
+	local function cycleDulang()
+		local st = S.d
+		reset(st)
+		Aksi:FireServer("mulai")
+		if not tunggu(st, "data", 3) then return false end
+		local tok = st.data.token
+
+		if st.data.habis or (set.kaya and not tostring(st.data.label or ""):find("Kaya")) then
+			Aksi:FireServer("batal", tok)
+			task.wait(0.3)
+			return "pindah"
+		end
+
+		status = "Mendulang: " .. tostring(st.data.label or "?")
+
+		if not set.animasi then
+			for i = 1, 4 do
+				task.wait(dur(Cfg.MIN_FASE[i] + 0.3, Cfg.MIN_FASE[i]))
+				if not running then Aksi:FireServer("batal", tok) return true end
+				if st.batal then return true end
+				Aksi:FireServer("fase", tok, i + 1)
+			end
+			task.wait(dur(Cfg.MIN_FASE[5] + 0.3, Cfg.MIN_FASE[5]))
+			if not running then Aksi:FireServer("batal", tok) return true end
+			if st.batal then return true end
+			Aksi:FireServer("selesai", tok, SKOR)
+			tunggu(st, "hasil", 6)
+			return true
+		end
+
+		local hum = humGet()
+		local ws, jp, jh, ar
+		if hum then
+			ws, jp, jh, ar = hum.WalkSpeed, hum.JumpPower, hum.JumpHeight, hum.AutoRotate
+			hum.WalkSpeed, hum.JumpPower, hum.JumpHeight = 0, 0, 0
+		end
+		local pegang = getTrack("PegangJalan")
+		if pegang and pegang.IsPlaying then pegang:Stop(0.15) end
+		local jongkok = getTrack("IdleJongkok")
+		if jongkok and not jongkok.IsPlaying then jongkok:Play(0.15) end
+
+		local ok = true
+		for i, f in FASE_ANIM do
+			if not running or st.batal or not set.dulang then ok = false break end
+			play(f[1])
+			if set.cepat then
+				task.wait(Cfg.MIN_FASE[i] + 0.1)
+			else
+				task.wait(f[2] + math.random() * 0.4)
+			end
+			if not running or st.batal then ok = false break end
+			if i < 5 then Aksi:FireServer("fase", tok, i + 1) end
+		end
+
+		if ok then
+			stopAllAnim()
+			Aksi:FireServer("selesai", tok, SKOR)
+			tunggu(st, "hasil", 6)
+		elseif not st.batal then
+			Aksi:FireServer("batal", tok)
+		end
+
+		stopAllAnim()
+		if jongkok and jongkok.IsPlaying then jongkok:Stop(0.15) end
+		hum = humGet()
+		if hum then
+			hum.WalkSpeed = (ws and ws > 0) and ws or 16
+			hum.JumpPower = jp or 50
+			hum.JumpHeight = jh or 7.2
+			hum.AutoRotate = ar ~= false
+		end
+		if running then
+			local p2 = getTrack("PegangJalan")
+			if p2 and not p2.IsPlaying then p2:Play(0.2) end
+		end
+		return true
+	end
+
+	local function posisiTungku()
+		local z = workspace:FindFirstChild("ZonaMendulangEmas")
+		local t = z and z:FindFirstChild("PandeEmas") and z.PandeEmas:FindFirstChild("TitikLebur")
+		if not t then return nil end
+		return (t:IsA("BasePart") and t.Position or t:GetPivot().Position)
+	end
+
+	local function cycleLebur()
+		local mg = LP:GetAttribute("SerbukEmasMg") or 0
+		local n = math.min(Cfg.LEBUR_MAKS_SEKALI, math.floor(mg / (Cfg.BATANGAN_GRAM * 1000)))
+		if n < 1 then return false end
+
+		status = "Melebur " .. n .. " batangan"
+		local hrp = hrpGet()
+		if not hrp then return false end
+		local asal
+		if set.teleport then
+			local pos = posisiTungku()
+			if not pos then return false end
+			asal = hrp.CFrame
+			hrp.CFrame = CFrame.new(pos + Vector3.new(0, 3, 0))
+			task.wait(set.cepat and 0.25 or 0.6)
+		end
+
+		local st = S.l
+		reset(st)
+		Lebur:FireServer("mulai", n)
+		if tunggu(st, "data", 3) then
+			local tok = st.data.token
+			if set.animasi then play("PompaUbub") end
+			task.wait(dur(8.5, Cfg.LEBUR_MIN[1]))
+			if not running then Lebur:FireServer("batal", tok) stopAllAnim() return true end
+			Lebur:FireServer("fase", tok, 2)
+			if set.animasi then play("TuangCetakan") end
+			task.wait(dur(3 + n * 1.5, Cfg.LEBUR_MIN[2]))
+			if not running then Lebur:FireServer("batal", tok) stopAllAnim() return true end
+			Lebur:FireServer("selesai", tok, true)
+			tunggu(st, "hasil", 6)
+			if set.animasi and running and not set.cepat then
+				play("AngkatBatangan")
+				task.wait(2)
+			end
+			stopAllAnim()
+		end
+
+		task.wait(set.cepat and 0.15 or 0.5)
+		local h = hrpGet()
+		if h and asal then h.CFrame = asal end
+		return true
+	end
+
+	-- ===== Loop utama =====
+	local gagal = 0
+	local sedangAktif = false
+	task.spawn(function()
+		while running do
+			task.wait(set.cepat and 0.05 or 0.2)
+			if not running then break end
+			local mg = LP:GetAttribute("SerbukEmasMg") or 0
+			if set.lebur and mg >= Cfg.BATANGAN_GRAM * 1000 then
+				pcall(cycleLebur)
+				task.wait(set.cepat and 0.2 or 1)
+				if running and set.dulang and set.teleport then keAir(false) end
+			elseif set.dulang then
+				sedangAktif = true
+				if equip() then
+					if set.teleport then
+						local hrp = hrpGet()
+						if hrp and (not asalCF or (hrp.Position - (titikAir[idxAir] or hrp.Position)).Magnitude > 25) then
+							keAir(false)
+						end
+					end
+					local ok, berhasil = pcall(cycleDulang)
+					if ok and berhasil == "pindah" then
+						status = "Endapan tidak cocok, pindah titik"
+						if set.teleport then keAir(true) end
+						gagal = 0
+					elseif ok and berhasil then
+						gagal = 0
+					else
+						gagal += 1
+						if gagal >= 2 then
+							if set.teleport then keAir(true) end
+							gagal = 0
+						end
+					end
+				else
+					status = "Dulang tidak ada di tas"
+				end
+				task.wait(dur(Cfg.JEDA + 0.3, Cfg.JEDA))
+			elseif sedangAktif then
+				sedangAktif = false
+				status = "Siap"
+				kembali()
+			end
+		end
+	end)
+
+	-- ===== Probe: cek endapan otomatis saat berjalan (tanpa dulang) =====
+	task.spawn(function()
+		local last
+		while running do
+			task.wait(2.7)
+			if running and set.probe and not set.dulang then
+				local hrp = hrpGet()
+				if hrp and equip() and (not last or (hrp.Position - last).Magnitude > 10) then
+					last = hrp.Position
+					reset(S.d)
+					Aksi:FireServer("mulai")
+					if tunggu(S.d, "data", 3) then
+						Aksi:FireServer("batal", S.d.data.token)
+					end
+				end
+			end
+		end
+	end)
+
+	-- ===== API untuk UI =====
+	local M = { set = set }
+	function M.SetActive(v)
+		set.dulang, set.lebur = v and true or false, v and true or false
+	end
+	function M.IsActive() return set.dulang or set.lebur end
+	function M.SetFlag(k, v)
+		set[k] = v and true or false
+		if k == "esp" then espFolder.Parent = set.esp and workspace.CurrentCamera or nil end
+	end
+	function M.Info()
+		return ("Serbuk emas: %s mg | Titik air: %d\nEndapan terdeteksi: %d\nStatus: %s"):format(
+			tostring(LP:GetAttribute("SerbukEmasMg") or 0), #titikAir, #spots, status)
+	end
+	function M.Kill()
+		running = false
+		set.dulang, set.lebur, set.probe = false, false, false
+		for _, c in myConns do pcall(function() c:Disconnect() end) end
+		for _, c in disabledConns do pcall(function() c:Enable() end) end
+		stopAllAnim()
+		local hum = humGet()
+		if hum then
+			if hum.WalkSpeed == 0 then hum.WalkSpeed = 16 end
+			if hum.JumpPower == 0 then hum.JumpPower = 50 end
+			if hum.JumpHeight == 0 then hum.JumpHeight = 7.2 end
+			hum.AutoRotate = true
+		end
+		if asalCF then kembali() end
+		pcall(function() espFolder:Destroy() end)
+	end
+	return M
+end
+
+--====================================================================
+-- UI: ala iOS (loading + menu 1 jendela)
+--====================================================================
+local C = {
+	bg = Color3.fromRGB(28, 28, 30),
+	card = Color3.fromRGB(44, 44, 46),
+	card2 = Color3.fromRGB(62, 62, 66),
+	tx = Color3.fromRGB(245, 245, 247),
+	tx2 = Color3.fromRGB(152, 152, 157),
+	gold = Color3.fromRGB(224, 176, 82),
+	ok = Color3.fromRGB(52, 199, 89),
+	bad = Color3.fromRGB(255, 59, 48),
+	warn = Color3.fromRGB(255, 204, 0),
+	off = Color3.fromRGB(88, 88, 92),
+}
+
+local function new(cls, props, parent)
+	local o = Instance.new(cls)
+	for k, v in pairs(props) do o[k] = v end
+	o.Parent = parent
+	return o
+end
+local function round(o, r) return new("UICorner", { CornerRadius = UDim.new(0, r) }, o) end
+local function tween(o, t, props)
+	TweenService:Create(o, TweenInfo.new(t, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), props):Play()
+end
+
+-- ---------- LOADING ----------
+local load = new("CanvasGroup", {
+	Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.fromRGB(12, 12, 14),
+	BorderSizePixel = 0, ZIndex = 100, GroupTransparency = 0,
+}, gui)
+
+local sunBox = new("Frame", {
+	Size = UDim2.fromOffset(110, 110), AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.new(0.5, 0, 0.5, -90), BackgroundTransparency = 1, ZIndex = 101,
+}, load)
+for i = 0, 5 do
+	local ray = new("Frame", {
+		Size = UDim2.fromOffset(6, 110), AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5), Rotation = i * 30,
+		BackgroundColor3 = C.gold, BorderSizePixel = 0, ZIndex = 101,
+	}, sunBox)
+	round(ray, 3)
+end
+local sunCore = new("Frame", {
+	Size = UDim2.fromOffset(62, 62), AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.fromScale(0.5, 0.5), BackgroundColor3 = Color3.fromRGB(247, 227, 160),
+	BorderSizePixel = 0, ZIndex = 102,
+}, sunBox)
+round(sunCore, 31)
+new("UIStroke", { Color = C.gold, Thickness = 3 }, sunCore)
+local sunDot = new("Frame", {
+	Size = UDim2.fromOffset(18, 18), AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.fromScale(0.5, 0.5), BackgroundColor3 = C.gold, BorderSizePixel = 0, ZIndex = 103,
+}, sunCore)
+round(sunDot, 9)
+
+on(RunService.RenderStepped, function(dt)
+	if sunBox.Parent then sunBox.Rotation = (sunBox.Rotation + dt * 20) % 360 end
+end)
+
+new("TextLabel", {
+	Size = UDim2.fromOffset(400, 40), AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.new(0.5, 0, 0.5, 10), BackgroundTransparency = 1,
+	Text = "MAJAPAHIT RP", Font = Enum.Font.GothamBlack, TextSize = 32,
+	TextColor3 = C.tx, ZIndex = 101,
+}, load)
+new("TextLabel", {
+	Size = UDim2.fromOffset(300, 20), AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.new(0.5, 0, 0.5, 44), BackgroundTransparency = 1,
+	Text = "V E R S I   1", Font = Enum.Font.GothamBold, TextSize = 13,
+	TextColor3 = C.gold, ZIndex = 101,
+}, load)
+
+local barTrack = new("Frame", {
+	Size = UDim2.fromOffset(260, 6), AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.new(0.5, 0, 0.5, 100), BackgroundColor3 = C.card2, BorderSizePixel = 0, ZIndex = 101,
+}, load)
+round(barTrack, 3)
+local barFill = new("Frame", {
+	Size = UDim2.fromScale(0, 1), BackgroundColor3 = C.gold, BorderSizePixel = 0, ZIndex = 102,
+}, barTrack)
+round(barFill, 3)
+local loadTxt = new("TextLabel", {
+	Size = UDim2.fromOffset(320, 20), AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.new(0.5, 0, 0.5, 124), BackgroundTransparency = 1,
+	Text = "Memulai…", Font = Enum.Font.Gotham, TextSize = 12, TextColor3 = C.tx2, ZIndex = 101,
+}, load)
+
+local function setProgress(p, text)
+	tween(barFill, 0.35, { Size = UDim2.fromScale(math.clamp(p, 0, 1), 1) })
+	loadTxt.Text = text .. " " .. math.floor(p * 100) .. "%"
+end
+
+-- ---------- KOMPONEN ----------
+local function header(parent, text)
+	return new("TextLabel", {
+		Size = UDim2.new(1, 0, 0, 20), BackgroundTransparency = 1, Text = text,
+		Font = Enum.Font.GothamBold, TextSize = 12, TextColor3 = C.gold,
+		TextXAlignment = Enum.TextXAlignment.Left,
+	}, parent)
+end
+
+local function infoCard(parent)
+	local card = new("Frame", {
+		Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundColor3 = C.card, BorderSizePixel = 0,
+	}, parent)
+	round(card, 12)
+	new("UIPadding", { PaddingTop = UDim.new(0, 10), PaddingBottom = UDim.new(0, 10), PaddingLeft = UDim.new(0, 12), PaddingRight = UDim.new(0, 12) }, card)
+	return new("TextLabel", {
+		Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1,
+		Text = "-", Font = Enum.Font.Gotham, TextSize = 12, TextColor3 = C.tx2, TextWrapped = true,
+		TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
+	}, card)
+end
+
+local refreshers = {}
+local function switchRow(parent, text, get, set)
+	local row = new("Frame", { Size = UDim2.new(1, 0, 0, 42), BackgroundColor3 = C.card, BorderSizePixel = 0 }, parent)
+	round(row, 12)
+	new("TextLabel", {
+		Size = UDim2.new(1, -70, 1, 0), Position = UDim2.fromOffset(12, 0), BackgroundTransparency = 1,
+		Text = text, Font = Enum.Font.Gotham, TextSize = 14, TextColor3 = C.tx,
+		TextXAlignment = Enum.TextXAlignment.Left,
+	}, row)
+	local sw = new("TextButton", {
+		Size = UDim2.fromOffset(46, 26), Position = UDim2.new(1, -56, 0.5, -13),
+		BackgroundColor3 = C.off, Text = "", AutoButtonColor = false,
+	}, row)
+	round(sw, 13)
+	local knob = new("Frame", {
+		Size = UDim2.fromOffset(22, 22), Position = UDim2.fromOffset(2, 2),
+		BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0,
+	}, sw)
+	round(knob, 11)
+	local last
+	local function render()
+		local v = get() and true or false
+		if v == last then return end
+		last = v
+		tween(sw, 0.2, { BackgroundColor3 = v and C.ok or C.off })
+		tween(knob, 0.2, { Position = v and UDim2.fromOffset(22, 2) or UDim2.fromOffset(2, 2) })
+	end
+	on(sw.MouseButton1Click, function() set(not get()) render() end)
+	render()
+	table.insert(refreshers, render)
+	return row
+end
+
+local function stepper(parent, text, get, set, minv, maxv, stp, fmt)
+	local row = new("Frame", { Size = UDim2.new(1, 0, 0, 42), BackgroundColor3 = C.card, BorderSizePixel = 0 }, parent)
+	round(row, 12)
+	new("TextLabel", {
+		Size = UDim2.new(1, -150, 1, 0), Position = UDim2.fromOffset(12, 0), BackgroundTransparency = 1,
+		Text = text, Font = Enum.Font.Gotham, TextSize = 14, TextColor3 = C.tx,
+		TextXAlignment = Enum.TextXAlignment.Left,
+	}, row)
+	local val = new("TextLabel", {
+		Size = UDim2.fromOffset(54, 28), Position = UDim2.new(1, -96, 0.5, -14), BackgroundTransparency = 1,
+		Text = "", Font = Enum.Font.GothamBold, TextSize = 13, TextColor3 = C.gold,
+	}, row)
+	local function render() val.Text = (fmt or "%s"):format(tostring(get())) end
+	local function btn(txt, x, dir)
+		local b = new("TextButton", {
+			Size = UDim2.fromOffset(28, 28), Position = UDim2.new(1, x, 0.5, -14),
+			BackgroundColor3 = C.card2, Text = txt, Font = Enum.Font.GothamBold, TextSize = 16,
+			TextColor3 = C.tx, AutoButtonColor = true,
+		}, row)
+		round(b, 8)
+		on(b.MouseButton1Click, function()
+			local v = math.clamp(math.floor((get() + dir * stp) * 1000 + 0.5) / 1000, minv, maxv)
+			set(v)
+			render()
+		end)
+	end
+	btn("−", -128, -1)
+	btn("+", -38, 1)
+	render()
+	return row
+end
+
+local function actionBtn(parent, text, cb)
+	local b = new("TextButton", {
+		Size = UDim2.new(1, 0, 0, 36), BackgroundColor3 = C.card2, Text = text,
+		Font = Enum.Font.GothamMedium, TextSize = 13, TextColor3 = C.tx, AutoButtonColor = true,
+	}, parent)
+	round(b, 12)
+	on(b.MouseButton1Click, cb)
+	return b
+end
+
+local function heroCard(parent, tag, title, desc)
+	local card = new("Frame", { Size = UDim2.new(1, 0, 0, 78), BackgroundColor3 = C.card, BorderSizePixel = 0 }, parent)
+	round(card, 16)
+	local ic = new("TextLabel", {
+		Size = UDim2.fromOffset(52, 52), Position = UDim2.fromOffset(12, 13), BackgroundColor3 = C.gold,
+		Text = tag, Font = Enum.Font.GothamBlack, TextSize = 18, TextColor3 = Color3.fromRGB(40, 28, 8),
+	}, card)
+	round(ic, 14)
+	new("TextLabel", {
+		Size = UDim2.new(1, -90, 0, 22), Position = UDim2.fromOffset(76, 12), BackgroundTransparency = 1,
+		Text = title, Font = Enum.Font.GothamBold, TextSize = 16, TextColor3 = C.tx,
+		TextXAlignment = Enum.TextXAlignment.Left,
+	}, card)
+	new("TextLabel", {
+		Size = UDim2.new(1, -90, 0, 16), Position = UDim2.fromOffset(76, 34), BackgroundTransparency = 1,
+		Text = desc, Font = Enum.Font.Gotham, TextSize = 11, TextColor3 = C.tx2,
+		TextXAlignment = Enum.TextXAlignment.Left,
+	}, card)
+	local st = new("TextLabel", {
+		Size = UDim2.new(1, -90, 0, 16), Position = UDim2.fromOffset(76, 52), BackgroundTransparency = 1,
+		Text = "○ Berhenti", Font = Enum.Font.GothamBold, TextSize = 12, TextColor3 = C.tx2,
+		TextXAlignment = Enum.TextXAlignment.Left,
+	}, card)
+	return st
+end
+
+-- ---------- BANGUN MENU ----------
+local function buildMain(mods, errs)
+	local TABS = {
+		{ key = "Fishing", name = "Fishing", title = "Auto Fishing", tag = "FS", desc = "Lempar, tunggu, auto menang minigame" },
+		{ key = "Tani", name = "Tani", title = "Auto Tani", tag = "TN", desc = "Cangkul, tanam, siram & panen" },
+		{ key = "Ternak", name = "Ternak", title = "Auto Ternak", tag = "TK", desc = "Ngarit, lumbung & isi pakan" },
+		{ key = "Dulang", name = "Dulang", title = "Auto Dulang", tag = "DL", desc = "Dulang emas & lebur batangan" },
+	}
+
+	local cam = workspace.CurrentCamera
+	local win = new("Frame", {
+		Name = "Window", Size = UDim2.fromOffset(350, 520), AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5), BackgroundColor3 = C.bg, BackgroundTransparency = 0.04, BorderSizePixel = 0,
+	}, gui)
+	round(win, 26)
+	new("UIStroke", { Color = Color3.fromRGB(80, 80, 84), Thickness = 1, Transparency = 0.3 }, win)
+	local scale = new("UIScale", { Scale = math.clamp(cam.ViewportSize.Y / 640, 0.6, 1) }, win)
+
+	-- header
+	local head = new("Frame", { Size = UDim2.new(1, 0, 0, 60), BackgroundTransparency = 1 }, win)
+	new("TextLabel", {
+		Size = UDim2.new(1, -110, 0, 26), Position = UDim2.fromOffset(18, 10), BackgroundTransparency = 1,
+		Text = "Majapahit RP", Font = Enum.Font.GothamBlack, TextSize = 20, TextColor3 = C.tx,
+		TextXAlignment = Enum.TextXAlignment.Left,
+	}, head)
+	new("TextLabel", {
+		Size = UDim2.new(1, -110, 0, 16), Position = UDim2.fromOffset(18, 34), BackgroundTransparency = 1,
+		Text = "Menu Auto · v1", Font = Enum.Font.Gotham, TextSize = 12, TextColor3 = C.tx2,
+		TextXAlignment = Enum.TextXAlignment.Left,
+	}, head)
+
+	local bubble = new("TextButton", {
+		Size = UDim2.fromOffset(46, 46), Position = UDim2.new(0, 16, 0.5, -23), BackgroundColor3 = C.gold,
+		Text = "M", Font = Enum.Font.GothamBlack, TextSize = 20, TextColor3 = Color3.fromRGB(40, 28, 8),
+		Visible = false, AutoButtonColor = true,
+	}, gui)
+	round(bubble, 23)
+
+	local function dot(x, color, txt, cb)
+		local b = new("TextButton", {
+			Size = UDim2.fromOffset(24, 24), Position = UDim2.new(1, x, 0, 18), BackgroundColor3 = color,
+			Text = txt, Font = Enum.Font.GothamBold, TextSize = 12, TextColor3 = Color3.fromRGB(60, 40, 0),
+			AutoButtonColor = true,
+		}, head)
+		round(b, 12)
+		on(b.MouseButton1Click, cb)
+	end
+	local function setHidden(h) win.Visible = not h bubble.Visible = h end
+	dot(-62, C.warn, "–", function() setHidden(true) end)
+	dot(-34, C.bad, "✕", function() Hub.Kill() end)
+	on(bubble.MouseButton1Click, function() setHidden(false) end)
+	on(UIS.InputBegan, function(i, gp)
+		if not gp and i.KeyCode == Enum.KeyCode.RightShift then setHidden(win.Visible) end
+	end)
+
+	-- drag
+	do
+		local dragging, ds, sp
+		on(head.InputBegan, function(i)
+			if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+				dragging, ds, sp = true, i.Position, win.Position
+			end
+		end)
+		on(UIS.InputChanged, function(i)
+			if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+				local d = i.Position - ds
+				win.Position = UDim2.new(sp.X.Scale, sp.X.Offset + d.X / scale.Scale, sp.Y.Scale, sp.Y.Offset + d.Y / scale.Scale)
+			end
+		end)
+		on(UIS.InputEnded, function(i)
+			if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then dragging = false end
+		end)
+	end
+
+	-- segmented control
+	local seg = new("Frame", {
+		Size = UDim2.new(1, -36, 0, 36), Position = UDim2.fromOffset(18, 62), BackgroundColor3 = C.card, BorderSizePixel = 0,
+	}, win)
+	round(seg, 11)
+	local pill = new("Frame", {
+		Size = UDim2.new(1 / #TABS, -4, 1, -6), Position = UDim2.new(0, 3, 0, 3), BackgroundColor3 = C.card2, BorderSizePixel = 0,
+	}, seg)
+	round(pill, 9)
+
+	local pages, hero, infos = {}, {}, {}
+	local pageHost = new("Frame", {
+		Size = UDim2.new(1, -36, 1, -180), Position = UDim2.fromOffset(18, 108), BackgroundTransparency = 1, ClipsDescendants = true,
+	}, win)
+
+	local cur = 1
+	local function setTab(i)
+		cur = i
+		tween(pill, 0.3, { Position = UDim2.new((i - 1) / #TABS, 3, 0, 3) })
+		for k, p in ipairs(pages) do p.Visible = (k == i) end
+	end
+
+	for i, t in ipairs(TABS) do
+		local b = new("TextButton", {
+			Size = UDim2.new(1 / #TABS, 0, 1, 0), Position = UDim2.new((i - 1) / #TABS, 0, 0, 0), BackgroundTransparency = 1,
+			Text = t.name, Font = Enum.Font.GothamBold, TextSize = 13, TextColor3 = C.tx, ZIndex = 2,
+		}, seg)
+		on(b.MouseButton1Click, function() setTab(i) end)
+
+		local page = new("ScrollingFrame", {
+			Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 3,
+			AutomaticCanvasSize = Enum.AutomaticSize.Y, CanvasSize = UDim2.new(), Visible = (i == 1),
+		}, pageHost)
+		new("UIListLayout", { Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder }, page)
+		pages[i] = page
+
+		local mod = mods[t.key]
+		hero[i] = heroCard(page, t.tag, t.title, t.desc)
+
+		if not mod then
+			infos[i] = infoCard(page)
+			infos[i].Text = "Modul tidak tersedia:\n" .. tostring(errs[t.key] or "tidak diketahui")
+			infos[i].TextColor3 = C.bad
+		elseif t.key == "Fishing" then
+			infos[i] = infoCard(page)
+			header(page, "PENGATURAN")
+			stepper(page, "Target Power Lempar", function() return mod.CFG.CastTargetPower end,
+				function(v) mod.CFG.CastTargetPower = v end, 0.5, 1, 0.05)
+			stepper(page, "Jeda Setelah Tangkap (dtk)", function() return mod.CFG.AfterCatchDelay end,
+				function(v) mod.CFG.AfterCatchDelay = v end, 1, 8, 0.5)
+		elseif t.key == "Tani" then
+			infos[i] = infoCard(page)
+			header(page, "BIBIT")
+			local seedRow = new("Frame", { Size = UDim2.new(1, 0, 0, 36), BackgroundTransparency = 1 }, page)
+			local seedBtns = {}
+			local function seedRender()
+				for n, b2 in pairs(seedBtns) do b2.BackgroundColor3 = (mod.S.Bibit == n) and C.ok or C.card end
+			end
+			local ns = #mod.Seeds
+			for k, n in ipairs(mod.Seeds) do
+				local b2 = new("TextButton", {
+					Size = UDim2.new(1 / ns, -6, 1, 0), Position = UDim2.new((k - 1) / ns, 0, 0, 0),
+					BackgroundColor3 = C.card, Text = n, Font = Enum.Font.GothamMedium, TextSize = 12,
+					TextColor3 = C.tx, AutoButtonColor = true,
+				}, seedRow)
+				round(b2, 10)
+				seedBtns[n] = b2
+				on(b2.MouseButton1Click, function() mod.SetBibit(n) seedRender() end)
+			end
+			seedRender()
+
+			local function sw(label, key)
+				switchRow(page, label, function() return mod.S[key] end, function(v) mod.S[key] = v mod.Mark() end)
+			end
+			header(page, "TANAM")
+			sw("Auto Cangkul", "Cangkul")
+			sw("Auto Tanam", "Tanam")
+			header(page, "PANEN / POHON")
+			sw("Panen / Cabut", "Panen")
+			sw("Petik Buah", "Petik")
+			sw("Pungut Buah", "Pungut")
+			sw("Goyang Pohon", "Goyang")
+			sw("Tebang Pohon", "Tebang")
+			sw("Siram", "Siram")
+			sw("Prompt Lainnya", "Lain")
+			header(page, "PETAK")
+			sw("ESP", "ESP")
+			stepper(page, "Margin Sel", function() return math.floor(mod.S.Margin * 100 + 0.5) end,
+				function(v) mod.SetMargin(v / 100) end, 0, 25, 5, "%s%%")
+			actionBtn(page, "Cari Ulang Petak Milikku", function() mod.CariUlang() end)
+			actionBtn(page, "Pakai Petak Terdekat", function() mod.PetakTerdekat() end)
+			actionBtn(page, "Reset Memori Cangkul", function() mod.ResetMemori() end)
+			actionBtn(page, "Dump Prompt (F9)", function() mod.Dump() end)
+		elseif t.key == "Dulang" then
+			infos[i] = infoCard(page)
+			header(page, "AUTO")
+			local function fl(label, key)
+				switchRow(page, label, function() return mod.set[key] end, function(v) mod.SetFlag(key, v) end)
+			end
+			fl("Auto Dulang", "dulang")
+			fl("Auto Lebur", "lebur")
+			header(page, "PENGATURAN")
+			fl("Animasi", "animasi")
+			fl("Teleport", "teleport")
+			fl("Cepat", "cepat")
+			fl("Cari Kaya", "kaya")
+			fl("ESP Endapan", "esp")
+			fl("Probe", "probe")
+		elseif t.key == "Ternak" then
+			infos[i] = infoCard(page)
+			header(page, "PENGATURAN")
+			stepper(page, "Isi Pakan Saat ≤ (%)", function() return mod.S.PAKAN_MIN end,
+				function(v) mod.S.PAKAN_MIN = v end, 5, 50, 5, "%s%%")
+			stepper(page, "Stok Minimum Darurat", function() return mod.S.STOK_MIN end,
+				function(v) mod.S.STOK_MIN = v end, 6, 48, 6)
+			header(page, "LOKASI")
+			switchRow(page, "Kembali ke Lokasi Awal", function() return mod.S.KEMBALI end,
+				function(v) mod.S.KEMBALI = v end)
+		end
+	end
+
+	-- footer
+	local go = new("TextButton", {
+		Size = UDim2.new(1, -36, 0, 48), Position = UDim2.new(0, 18, 1, -62), BackgroundColor3 = C.ok,
+		Text = "Mulai", Font = Enum.Font.GothamBold, TextSize = 17, TextColor3 = Color3.new(1, 1, 1), AutoButtonColor = true,
+	}, win)
+	round(go, 16)
+	on(go.MouseButton1Click, function()
+		local mod = mods[TABS[cur].key]
+		if mod then mod.SetActive(not mod.IsActive()) end
+	end)
+
+	task.spawn(function()
+		while Hub.Alive do
+			for i, t in ipairs(TABS) do
+				local mod = mods[t.key]
+				if mod and infos[i] then
+					local okI, txt = pcall(mod.Info)
+					if okI then infos[i].Text = txt end
+					local run = mod.IsActive()
+					hero[i].Text = run and "● Berjalan" or "○ Berhenti"
+					hero[i].TextColor3 = run and C.ok or C.tx2
+				end
+			end
+			for _, f in ipairs(refreshers) do pcall(f) end
+			local mod = mods[TABS[cur].key]
+			if mod then
+				local run = mod.IsActive()
+				go.Text = run and "Berhenti" or "Mulai"
+				go.BackgroundColor3 = run and C.bad or C.ok
+			else
+				go.Text = "Tidak tersedia"
+				go.BackgroundColor3 = C.off
+			end
+			task.wait(0.3)
+		end
+	end)
+
+	win.Size = UDim2.fromOffset(350, 520)
+	setTab(1)
+end
+
+-- ---------- ALUR UTAMA ----------
+task.spawn(function()
+	setProgress(0.1, "Memuat aset…")
+	task.wait(0.4)
+
+	local mods, errs = {}, {}
+	local list = { { "Fishing", ModFishing }, { "Tani", ModTani }, { "Ternak", ModTernak }, { "Dulang", ModDulang } }
+	for i, e in ipairs(list) do
+		setProgress(0.15 + 0.17 * (i - 1), "Memuat modul " .. e[1] .. "…")
+		local ok, res, err = pcall(e[2])
+		if ok and res then
+			mods[e[1]] = res
+			Hub.Mods[e[1]] = res
+		else
+			errs[e[1]] = (not ok and tostring(res)) or err or "gagal dimuat"
+			warn("[MajapahitRP] " .. e[1] .. ": " .. tostring(errs[e[1]]))
+		end
+		task.wait(0.3)
+	end
+
+	setProgress(0.85, "Menyiapkan menu…")
+	task.wait(0.3)
+	local okUI, errUI = pcall(buildMain, mods, errs)
+	if not okUI then warn("[MajapahitRP UI] " .. tostring(errUI)) end
+
+	setProgress(1, "Selamat datang!")
+	task.wait(0.6)
+	tween(load, 0.6, { GroupTransparency = 1 })
+	task.wait(0.7)
+	pcall(function() load:Destroy() end)
+end)

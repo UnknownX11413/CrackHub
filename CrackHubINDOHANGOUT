@@ -1,0 +1,712 @@
+-- INDOHANGOUT V1 | Crystal Miner + Auto Fishing | tema iOS (1 UI, 2 tab)
+
+local Players = game:GetService("Players")
+local RS = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local UIS = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+
+local lp = Players.LocalPlayer
+local PG = lp:WaitForChild("PlayerGui")
+
+local env = (getgenv and getgenv()) or _G
+if env.__CM_CLEAN then pcall(env.__CM_CLEAN) end
+
+local conns = {}
+local function C(sig, fn) local c = sig:Connect(fn); conns[#conns + 1] = c; return c end
+local mods = {}
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "CrystalFishingUI"
+gui.ResetOnSpawn = false
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+gui.Parent = (gethui and gethui()) or game:GetService("CoreGui")
+
+local function Kill()
+	for _, m in pairs(mods) do pcall(m.Kill) end
+	for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+	table.clear(conns)
+	pcall(function() gui:Destroy() end)
+	env.__CM_TOKEN = nil
+	env.__CM_CLEAN = nil
+end
+env.__CM_CLEAN = Kill
+
+--====================================================================
+-- MODUL: CRYSTAL MINER
+--====================================================================
+local function ModMining()
+	local map = workspace:WaitForChild("MapContent", 5)
+	local Crystals = map and map:WaitForChild("Crystals", 5)
+	if not Crystals then return nil, "workspace.MapContent.Crystals tidak ditemukan" end
+
+	local S = {
+		Auto = false,
+		ESP = true,
+		Move = "Jalan",
+		Speed = "Normal",
+		DelayNormal = 0.2,
+		DelayFast = 0.1,
+		Range = 2.8,
+		Approach = 2.2,
+		MaxWalk = 600,
+		FailSwings = 40,
+		SkipTime = 8,
+	}
+
+	local blacklist, status = {}, "idle"
+	local swings, drops, skipped, since = 0, 0, 0, 0
+	local okMax, failMin, curDist = 0, math.huge, nil
+
+	local function hrp() local c = lp.Character return c and c:FindFirstChild("HumanoidRootPart") end
+	local function posOf(i)
+		if i:IsA("BasePart") then return i.Position end
+		if i:IsA("Model") then return i:GetPivot().Position end
+	end
+	local function surfaceDist(c, pos)
+		local cf, size
+		if c:IsA("BasePart") then cf, size = c.CFrame, c.Size else cf, size = c:GetBoundingBox() end
+		local rel, h = cf:PointToObjectSpace(pos), size / 2
+		local cl = Vector3.new(math.clamp(rel.X, -h.X, h.X), math.clamp(rel.Y, -h.Y, h.Y), math.clamp(rel.Z, -h.Z, h.Z))
+		return (pos - cf:PointToWorldSpace(cl)).Magnitude
+	end
+	local function isSkipped(c) return blacklist[c] and blacklist[c] > os.clock() end
+	local function swingDelay() return S.Speed == "Cepat" and S.DelayFast or S.DelayNormal end
+
+	local function getPickaxe()
+		local c = lp.Character
+		if not c then return end
+		for _, t in ipairs(c:GetChildren()) do
+			if t:IsA("Tool") and t.Name:lower():find("pickaxe", 1, true) then return t end
+		end
+		local bpk = lp:FindFirstChildOfClass("Backpack")
+		if bpk then
+			for _, t in ipairs(bpk:GetChildren()) do
+				if t:IsA("Tool") and t.Name:lower():find("pickaxe", 1, true) then
+					local h = c:FindFirstChildOfClass("Humanoid")
+					if h then h:EquipTool(t) end
+					task.wait(0.2)
+					return t
+				end
+			end
+		end
+	end
+
+	local function pick(root)
+		local stay = S.Move == "Diam"
+		local best, bd, inR = nil, nil, 0
+		for _, c in ipairs(Crystals:GetChildren()) do
+			local d = surfaceDist(c, root.Position)
+			if (stay and d <= S.Range) or (not stay and d <= S.MaxWalk) then
+				inR += 1
+				if not isSkipped(c) and (not bd or d < bd) then best, bd = c, d end
+			end
+		end
+		if not best and inR > 0 then table.clear(blacklist) end
+		return best, bd
+	end
+
+	local function onDrop(name)
+		if not name:lower():find("crystal", 1, true) then return end
+		drops += 1
+		since = 0
+		if curDist then okMax = math.max(okMax, curDist) end
+	end
+	local bp = lp:WaitForChild("Backpack")
+	local function watchItem(it) C(it:GetPropertyChangedSignal("Name"), function() onDrop(it.Name) end) end
+	for _, it in ipairs(bp:GetChildren()) do watchItem(it) end
+	C(bp.ChildAdded, function(it) watchItem(it); onDrop(it.Name) end)
+
+	local function standCFrame(root, target)
+		local p = posOf(target)
+		if not p then return end
+		local dir = (root.Position - p) * Vector3.new(1, 0, 1)
+		if dir.Magnitude < 0.1 then dir = Vector3.new(1, 0, 0) end
+		local stand = p + dir.Unit * math.max(S.Approach + 1, 2)
+		local pos = Vector3.new(stand.X, root.Position.Y, stand.Z)
+		return CFrame.lookAt(pos, Vector3.new(p.X, root.Position.Y, p.Z))
+	end
+
+	local function mine()
+		local token = {}
+		env.__CM_TOKEN = token
+		local tgt
+		while S.Auto and env.__CM_TOKEN == token do
+			local root = hrp()
+			local tool = root and getPickaxe()
+			if not tool then
+				status = root and "pickaxe tidak ada" or "karakter tidak ada"
+				task.wait(0.5)
+				continue
+			end
+			local target, d = pick(root)
+			if not target then
+				status = S.Move == "Diam" and "tidak ada crystal di range" or "tidak ada crystal"
+				task.wait(0.4)
+				continue
+			end
+			if target ~= tgt then tgt, since = target, 0 end
+			curDist = d
+
+			if S.Move ~= "Diam" then
+				local hum = lp.Character:FindFirstChildOfClass("Humanoid")
+				local p = posOf(target)
+				if hum and p then
+					if d > S.Approach + 0.4 then
+						if S.Move == "Teleport" then
+							local cf = standCFrame(root, target)
+							if cf then
+								root.CFrame = cf
+								root.AssemblyLinearVelocity = Vector3.zero
+							end
+							status = string.format("teleport ke crystal %.1f", d)
+							task.wait(0.15)
+						else
+							local dir = (root.Position - p) * Vector3.new(1, 0, 1)
+							if dir.Magnitude < 0.1 then dir = Vector3.new(1, 0, 0) end
+							hum:MoveTo(p + dir.Unit * math.max(S.Approach, 1))
+							status = string.format("jalan ke crystal %.1f", d)
+							local t0 = os.clock()
+							while S.Auto and target.Parent and os.clock() - t0 < 1.5 do
+								local r2 = hrp()
+								if not r2 or surfaceDist(target, r2.Position) <= S.Approach + 0.4 then break end
+								if hum.MoveDirection.Magnitude < 0.05 then hum.Jump = true end
+								task.wait(0.1)
+							end
+						end
+						continue
+					end
+					hum:MoveTo(root.Position)
+					root.CFrame = CFrame.lookAt(root.Position, Vector3.new(p.X, root.Position.Y, p.Z))
+				end
+			end
+
+			pcall(function() tool:Activate() end)
+			swings += 1
+			since += 1
+			status = string.format("mine %.1f studs (%d/%d) [%s]", d, since, S.FailSwings, S.Speed)
+			task.wait(swingDelay())
+
+			if since >= S.FailSwings then
+				blacklist[target] = os.clock() + S.SkipTime
+				failMin = math.min(failMin, d)
+				skipped += 1
+				since, tgt = 0, nil
+			end
+		end
+		status = "idle"
+	end
+
+	-- ESP
+	local espObjs = {}
+	local function addESP(c)
+		if espObjs[c] then return end
+		local adornee = c:IsA("BasePart") and c or (c.PrimaryPart or c:FindFirstChildWhichIsA("BasePart", true))
+		if not adornee then return end
+		local hl = Instance.new("Highlight")
+		hl.Adornee = c
+		hl.FillTransparency = 0.6
+		hl.OutlineTransparency = 0
+		hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+		hl.Parent = gui
+		local bb = Instance.new("BillboardGui")
+		bb.Adornee = adornee
+		bb.Size = UDim2.fromOffset(120, 30)
+		bb.StudsOffset = Vector3.new(0, 3, 0)
+		bb.AlwaysOnTop = true
+		bb.Parent = gui
+		local tl = Instance.new("TextLabel")
+		tl.Size = UDim2.fromScale(1, 1)
+		tl.BackgroundTransparency = 1
+		tl.TextStrokeTransparency = 0
+		tl.Font = Enum.Font.GothamBold
+		tl.TextSize = 12
+		tl.Parent = bb
+		espObjs[c] = { hl = hl, bb = bb, tl = tl }
+	end
+	local function removeESP(c)
+		local o = espObjs[c]
+		if o then o.hl:Destroy() o.bb:Destroy() espObjs[c] = nil end
+	end
+	for _, c in ipairs(Crystals:GetChildren()) do addESP(c) end
+	C(Crystals.ChildAdded, function(c) task.wait() addESP(c) end)
+	C(Crystals.ChildRemoved, removeESP)
+
+	local acc = 0
+	C(RunService.Heartbeat, function(dt)
+		acc += dt
+		if acc < 0.2 then return end
+		acc = 0
+		local root = hrp()
+		for c, o in pairs(espObjs) do
+			if not c.Parent then removeESP(c)
+			else
+				o.hl.Enabled = S.ESP
+				o.bb.Enabled = S.ESP
+				if S.ESP then
+					local d = root and surfaceDist(c, root.Position) or 0
+					local sk = isSkipped(c)
+					local col = sk and Color3.fromRGB(255, 150, 40)
+						or (d <= S.Range and Color3.fromRGB(90, 255, 120) or Color3.fromRGB(90, 220, 255))
+					o.hl.FillColor, o.hl.OutlineColor, o.tl.TextColor3 = col, col, col
+					o.tl.Text = string.format("%s [%.1f]%s", c.Name, d, sk and " SKIP" or "")
+				end
+			end
+		end
+	end)
+
+	local M = { S = S }
+	function M.SetActive(v)
+		v = v and true or false
+		if v == S.Auto then return end
+		S.Auto = v
+		if v then task.spawn(mine) else env.__CM_TOKEN = nil end
+	end
+	function M.IsActive() return S.Auto end
+	function M.Info()
+		return string.format("%s\nswing: %d | drop: %d | skip: %d\nok max: %.1f | fail min: %s",
+			status, swings, drops, skipped, okMax, failMin == math.huge and "-" or string.format("%.1f", failMin))
+	end
+	function M.Kill()
+		S.Auto = false
+		for c in pairs(espObjs) do removeESP(c) end
+	end
+	return M
+end
+
+--====================================================================
+-- MODUL: AUTO FISHING (Rod / Reeling)
+--====================================================================
+local function ModFishing()
+	local ev = RS:WaitForChild("Events", 5)
+	local re = ev and ev:WaitForChild("RemoteEvent", 5)
+	local Rod = re and re:WaitForChild("Rod", 5)
+	if not Rod then return nil, "ReplicatedStorage.Events.RemoteEvent.Rod tidak ditemukan" end
+
+	local S = { enabled = false, reeling = false, nextCast = 0, session = 0 }
+	local alive = true
+
+	local function getRod()
+		local char = lp.Character
+		if not char then return end
+		for _, t in ipairs(char:GetChildren()) do
+			if t:IsA("Tool") and t.Name:find("Rod") then return t end
+		end
+		local hum = char:FindFirstChildOfClass("Humanoid")
+		for _, t in ipairs(lp.Backpack:GetChildren()) do
+			if t:IsA("Tool") and t.Name:find("Rod") then
+				if hum then hum:EquipTool(t) task.wait(0.3) end
+				return t
+			end
+		end
+	end
+
+	local function cast()
+		local rod = getRod()
+		if not rod then return end
+		pcall(function() rod:Activate() end)
+		S.nextCast = os.clock() + 30
+	end
+
+	local function refs()
+		local g = PG:FindFirstChild("Reeling")
+		if not g then return end
+		local mf = g:FindFirstChild("MainFrame")
+		if not mf then return end
+		local fr = mf:FindFirstChild("Frame")
+		return g, mf, fr and fr:FindFirstChild("WhiteBar")
+	end
+
+	local function reelingOpen()
+		local g, mf = refs()
+		return g ~= nil and mf ~= nil and g.Enabled and mf.Visible
+	end
+
+	local function widen()
+		local _, _, white = refs()
+		if not white then return end
+		pcall(function()
+			white.Size = UDim2.new(1, 0, 1, 0)
+			white.Position = UDim2.new(white.AnchorPoint.X, 0, white.Position.Y.Scale, white.Position.Y.Offset)
+		end)
+	end
+
+	local function finish()
+		S.reeling = false
+		S.nextCast = os.clock() + 1.5
+	end
+
+	local function handleReel(session)
+		local function ok() return alive and S.enabled and session == S.session end
+
+		local t0 = os.clock()
+		while not reelingOpen() and os.clock() - t0 < 2 do task.wait(0.05) end
+
+		local c1 = RunService.Heartbeat:Connect(widen)
+		local c2 = RunService.RenderStepped:Connect(widen)
+
+		local startT = os.clock()
+		while ok() and reelingOpen() and os.clock() - startT < 45 do task.wait(0.1) end
+
+		c1:Disconnect()
+		c2:Disconnect()
+		task.wait(0.3)
+		finish()
+	end
+
+	C(Rod.OnClientEvent, function(action)
+		if action == "StartReeling" and S.enabled and not S.reeling then
+			S.reeling = true
+			S.session += 1
+			task.spawn(handleReel, S.session)
+		end
+	end)
+
+	task.spawn(function()
+		while alive do
+			task.wait(0.25)
+			if S.enabled and not S.reeling and os.clock() >= S.nextCast then
+				cast()
+			end
+		end
+	end)
+
+	local M = { S = S }
+	function M.SetActive(v)
+		S.enabled = v and true or false
+		if S.enabled then S.nextCast = 0 else S.reeling = false end
+	end
+	function M.IsActive() return S.enabled end
+	function M.Info()
+		return "Status: " .. (not S.enabled and "Idle" or S.reeling and "Reeling" or "Menunggu gigitan")
+	end
+	function M.Kill()
+		alive = false
+		S.enabled = false
+		S.reeling = false
+	end
+	return M
+end
+
+--====================================================================
+-- UI ala iOS
+--====================================================================
+local K = {
+	bg = Color3.fromRGB(28, 28, 30),
+	card = Color3.fromRGB(44, 44, 46),
+	card2 = Color3.fromRGB(62, 62, 66),
+	tx = Color3.fromRGB(245, 245, 247),
+	tx2 = Color3.fromRGB(152, 152, 157),
+	gold = Color3.fromRGB(224, 176, 82),
+	ok = Color3.fromRGB(52, 199, 89),
+	bad = Color3.fromRGB(255, 59, 48),
+	warn = Color3.fromRGB(255, 204, 0),
+	off = Color3.fromRGB(88, 88, 92),
+}
+
+local function new(cls, props, parent)
+	local o = Instance.new(cls)
+	for k, v in pairs(props) do o[k] = v end
+	o.Parent = parent
+	return o
+end
+local function round(o, r) return new("UICorner", { CornerRadius = UDim.new(0, r) }, o) end
+local function tween(o, t, props)
+	TweenService:Create(o, TweenInfo.new(t, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), props):Play()
+end
+
+local refreshers = {}
+
+local function header(parent, text)
+	return new("TextLabel", {
+		Size = UDim2.new(1, 0, 0, 20), BackgroundTransparency = 1, Text = text,
+		Font = Enum.Font.GothamBold, TextSize = 12, TextColor3 = K.gold,
+		TextXAlignment = Enum.TextXAlignment.Left,
+	}, parent)
+end
+
+local function infoCard(parent)
+	local card = new("Frame", {
+		Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundColor3 = K.card, BorderSizePixel = 0,
+	}, parent)
+	round(card, 12)
+	new("UIPadding", { PaddingTop = UDim.new(0, 10), PaddingBottom = UDim.new(0, 10), PaddingLeft = UDim.new(0, 12), PaddingRight = UDim.new(0, 12) }, card)
+	return new("TextLabel", {
+		Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1,
+		Text = "-", Font = Enum.Font.Gotham, TextSize = 12, TextColor3 = K.tx2, TextWrapped = true,
+		TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
+	}, card)
+end
+
+local function rowBase(parent, text, labelW)
+	local row = new("Frame", { Size = UDim2.new(1, 0, 0, 42), BackgroundColor3 = K.card, BorderSizePixel = 0 }, parent)
+	round(row, 12)
+	new("TextLabel", {
+		Size = UDim2.new(1, labelW, 1, 0), Position = UDim2.fromOffset(12, 0), BackgroundTransparency = 1,
+		Text = text, Font = Enum.Font.Gotham, TextSize = 14, TextColor3 = K.tx,
+		TextXAlignment = Enum.TextXAlignment.Left,
+	}, row)
+	return row
+end
+
+local function switchRow(parent, text, get, set)
+	local row = rowBase(parent, text, -70)
+	local sw = new("TextButton", {
+		Size = UDim2.fromOffset(46, 26), Position = UDim2.new(1, -56, 0.5, -13),
+		BackgroundColor3 = K.off, Text = "", AutoButtonColor = false,
+	}, row)
+	round(sw, 13)
+	local knob = new("Frame", {
+		Size = UDim2.fromOffset(22, 22), Position = UDim2.fromOffset(2, 2),
+		BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0,
+	}, sw)
+	round(knob, 11)
+	local last
+	local function render()
+		local v = get() and true or false
+		if v == last then return end
+		last = v
+		tween(sw, 0.2, { BackgroundColor3 = v and K.ok or K.off })
+		tween(knob, 0.2, { Position = v and UDim2.fromOffset(22, 2) or UDim2.fromOffset(2, 2) })
+	end
+	C(sw.MouseButton1Click, function() set(not get()) render() end)
+	render()
+	table.insert(refreshers, render)
+end
+
+local function choiceRow(parent, text, get, set, options)
+	local row = rowBase(parent, text, -120)
+	local b = new("TextButton", {
+		Size = UDim2.fromOffset(96, 28), Position = UDim2.new(1, -106, 0.5, -14),
+		BackgroundColor3 = K.card2, Text = "", Font = Enum.Font.GothamBold, TextSize = 13,
+		TextColor3 = K.gold, AutoButtonColor = true,
+	}, row)
+	round(b, 8)
+	local function render() b.Text = tostring(get()) end
+	C(b.MouseButton1Click, function()
+		local idx = table.find(options, get()) or 1
+		set(options[idx % #options + 1])
+		render()
+	end)
+	render()
+	table.insert(refreshers, render)
+end
+
+local function stepper(parent, text, get, set, minv, maxv, stp)
+	local row = rowBase(parent, text, -150)
+	local val = new("TextLabel", {
+		Size = UDim2.fromOffset(54, 28), Position = UDim2.new(1, -96, 0.5, -14), BackgroundTransparency = 1,
+		Text = "", Font = Enum.Font.GothamBold, TextSize = 13, TextColor3 = K.gold,
+	}, row)
+	local function render() val.Text = tostring(get()) end
+	local function btn(txt, x, dir)
+		local b = new("TextButton", {
+			Size = UDim2.fromOffset(28, 28), Position = UDim2.new(1, x, 0.5, -14),
+			BackgroundColor3 = K.card2, Text = txt, Font = Enum.Font.GothamBold, TextSize = 16,
+			TextColor3 = K.tx, AutoButtonColor = true,
+		}, row)
+		round(b, 8)
+		C(b.MouseButton1Click, function()
+			set(math.clamp(math.floor((get() + dir * stp) * 1000 + 0.5) / 1000, minv, maxv))
+			render()
+		end)
+	end
+	btn("−", -128, -1)
+	btn("+", -38, 1)
+	render()
+end
+
+local function heroCard(parent, tag, title, desc)
+	local card = new("Frame", { Size = UDim2.new(1, 0, 0, 78), BackgroundColor3 = K.card, BorderSizePixel = 0 }, parent)
+	round(card, 16)
+	local ic = new("TextLabel", {
+		Size = UDim2.fromOffset(52, 52), Position = UDim2.fromOffset(12, 13), BackgroundColor3 = K.gold,
+		Text = tag, Font = Enum.Font.GothamBlack, TextSize = 18, TextColor3 = Color3.fromRGB(40, 28, 8),
+	}, card)
+	round(ic, 14)
+	new("TextLabel", {
+		Size = UDim2.new(1, -90, 0, 22), Position = UDim2.fromOffset(76, 12), BackgroundTransparency = 1,
+		Text = title, Font = Enum.Font.GothamBold, TextSize = 16, TextColor3 = K.tx,
+		TextXAlignment = Enum.TextXAlignment.Left,
+	}, card)
+	new("TextLabel", {
+		Size = UDim2.new(1, -90, 0, 16), Position = UDim2.fromOffset(76, 34), BackgroundTransparency = 1,
+		Text = desc, Font = Enum.Font.Gotham, TextSize = 11, TextColor3 = K.tx2,
+		TextXAlignment = Enum.TextXAlignment.Left,
+	}, card)
+	return new("TextLabel", {
+		Size = UDim2.new(1, -90, 0, 16), Position = UDim2.fromOffset(76, 52), BackgroundTransparency = 1,
+		Text = "○ Berhenti", Font = Enum.Font.GothamBold, TextSize = 12, TextColor3 = K.tx2,
+		TextXAlignment = Enum.TextXAlignment.Left,
+	}, card)
+end
+
+local errs = {}
+do
+	local ok1, r1, e1 = pcall(ModMining)
+	if ok1 and r1 then mods.Mining = r1 else errs.Mining = (not ok1 and tostring(r1)) or e1 or "gagal dimuat" end
+	local ok2, r2, e2 = pcall(ModFishing)
+	if ok2 and r2 then mods.Fishing = r2 else errs.Fishing = (not ok2 and tostring(r2)) or e2 or "gagal dimuat" end
+end
+
+local TABS = {
+	{ key = "Mining", name = "Mining", title = "Crystal Miner", tag = "CM", desc = "Cari & tambang crystal otomatis" },
+	{ key = "Fishing", name = "Fishing", title = "Auto Fishing", tag = "FS", desc = "Lempar & auto menang reeling" },
+}
+
+local win = new("Frame", {
+	Name = "Window", Size = UDim2.fromOffset(350, 540), AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.fromScale(0.5, 0.5), BackgroundColor3 = K.bg, BackgroundTransparency = 0.04, BorderSizePixel = 0,
+}, gui)
+round(win, 26)
+new("UIStroke", { Color = Color3.fromRGB(80, 80, 84), Thickness = 1, Transparency = 0.3 }, win)
+local scale = new("UIScale", { Scale = math.clamp(workspace.CurrentCamera.ViewportSize.Y / 660, 0.6, 1) }, win)
+
+local head = new("Frame", { Size = UDim2.new(1, 0, 0, 60), BackgroundTransparency = 1 }, win)
+new("TextLabel", {
+	Size = UDim2.new(1, -110, 0, 26), Position = UDim2.fromOffset(18, 10), BackgroundTransparency = 1,
+	Text = "INDOHANGOUT V1", Font = Enum.Font.GothamBlack, TextSize = 20, TextColor3 = K.tx,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, head)
+new("TextLabel", {
+	Size = UDim2.new(1, -110, 0, 16), Position = UDim2.fromOffset(18, 34), BackgroundTransparency = 1,
+	Text = "Crystal Miner & Auto Fishing", Font = Enum.Font.GothamBold, TextSize = 12, TextColor3 = K.gold,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, head)
+
+local bubble = new("TextButton", {
+	Size = UDim2.fromOffset(46, 46), Position = UDim2.new(0, 16, 0.5, -23), BackgroundColor3 = K.gold,
+	Text = "A", Font = Enum.Font.GothamBlack, TextSize = 20, TextColor3 = Color3.fromRGB(40, 28, 8),
+	Visible = false, AutoButtonColor = true,
+}, gui)
+round(bubble, 23)
+
+local function dot(x, color, txt, cb)
+	local b = new("TextButton", {
+		Size = UDim2.fromOffset(24, 24), Position = UDim2.new(1, x, 0, 18), BackgroundColor3 = color,
+		Text = txt, Font = Enum.Font.GothamBold, TextSize = 12, TextColor3 = Color3.fromRGB(60, 40, 0),
+		AutoButtonColor = true,
+	}, head)
+	round(b, 12)
+	C(b.MouseButton1Click, cb)
+end
+local function setHidden(h) win.Visible = not h bubble.Visible = h end
+dot(-62, K.warn, "–", function() setHidden(true) end)
+dot(-34, K.bad, "✕", Kill)
+C(bubble.MouseButton1Click, function() setHidden(false) end)
+
+do
+	local dragging, ds, sp
+	C(head.InputBegan, function(i)
+		if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+			dragging, ds, sp = true, i.Position, win.Position
+		end
+	end)
+	C(UIS.InputChanged, function(i)
+		if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+			local d = i.Position - ds
+			win.Position = UDim2.new(sp.X.Scale, sp.X.Offset + d.X / scale.Scale, sp.Y.Scale, sp.Y.Offset + d.Y / scale.Scale)
+		end
+	end)
+	C(UIS.InputEnded, function(i)
+		if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then dragging = false end
+	end)
+end
+
+local seg = new("Frame", {
+	Size = UDim2.new(1, -36, 0, 36), Position = UDim2.fromOffset(18, 62), BackgroundColor3 = K.card, BorderSizePixel = 0,
+}, win)
+round(seg, 11)
+local pill = new("Frame", {
+	Size = UDim2.new(1 / #TABS, -4, 1, -6), Position = UDim2.new(0, 3, 0, 3), BackgroundColor3 = K.card2, BorderSizePixel = 0,
+}, seg)
+round(pill, 9)
+
+local pageHost = new("Frame", {
+	Size = UDim2.new(1, -36, 1, -180), Position = UDim2.fromOffset(18, 108), BackgroundTransparency = 1, ClipsDescendants = true,
+}, win)
+
+local pages, hero, infos = {}, {}, {}
+local cur = 1
+local function setTab(i)
+	cur = i
+	tween(pill, 0.3, { Position = UDim2.new((i - 1) / #TABS, 3, 0, 3) })
+	for k, p in ipairs(pages) do p.Visible = (k == i) end
+end
+
+for i, t in ipairs(TABS) do
+	local b = new("TextButton", {
+		Size = UDim2.new(1 / #TABS, 0, 1, 0), Position = UDim2.new((i - 1) / #TABS, 0, 0, 0), BackgroundTransparency = 1,
+		Text = t.name, Font = Enum.Font.GothamBold, TextSize = 13, TextColor3 = K.tx, ZIndex = 2,
+	}, seg)
+	C(b.MouseButton1Click, function() setTab(i) end)
+
+	local page = new("ScrollingFrame", {
+		Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 3,
+		AutomaticCanvasSize = Enum.AutomaticSize.Y, CanvasSize = UDim2.new(), Visible = (i == 1),
+	}, pageHost)
+	new("UIListLayout", { Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder }, page)
+	pages[i] = page
+
+	local mod = mods[t.key]
+	hero[i] = heroCard(page, t.tag, t.title, t.desc)
+	infos[i] = infoCard(page)
+
+	if not mod then
+		infos[i].Text = "Modul tidak tersedia:\n" .. tostring(errs[t.key])
+		infos[i].TextColor3 = K.bad
+	elseif t.key == "Mining" then
+		local S = mod.S
+		header(page, "PENGATURAN")
+		switchRow(page, "ESP Crystal", function() return S.ESP end, function(v) S.ESP = v end)
+		choiceRow(page, "Gerak", function() return S.Move end, function(v) S.Move = v end, { "Jalan", "Teleport", "Diam" })
+		choiceRow(page, "Mining", function() return S.Speed end, function(v) S.Speed = v end, { "Normal", "Cepat" })
+		header(page, "PARAMETER")
+		stepper(page, "Delay normal (s)", function() return S.DelayNormal end, function(v) S.DelayNormal = v end, 0.05, 1, 0.05)
+		stepper(page, "Delay cepat (s)", function() return S.DelayFast end, function(v) S.DelayFast = v end, 0.05, 1, 0.05)
+		stepper(page, "Range hit (studs)", function() return S.Range end, function(v) S.Range = v end, 1, 10, 0.2)
+		stepper(page, "Jarak berhenti", function() return S.Approach end, function(v) S.Approach = v end, 1, 10, 0.2)
+		stepper(page, "Max cari (studs)", function() return S.MaxWalk end, function(v) S.MaxWalk = v end, 50, 1000, 50)
+		stepper(page, "Swing tanpa drop", function() return S.FailSwings end, function(v) S.FailSwings = v end, 10, 100, 5)
+		stepper(page, "Skip time (s)", function() return S.SkipTime end, function(v) S.SkipTime = v end, 2, 30, 1)
+	end
+end
+
+local go = new("TextButton", {
+	Size = UDim2.new(1, -36, 0, 48), Position = UDim2.new(0, 18, 1, -62), BackgroundColor3 = K.ok,
+	Text = "Mulai", Font = Enum.Font.GothamBold, TextSize = 17, TextColor3 = Color3.new(1, 1, 1), AutoButtonColor = true,
+}, win)
+round(go, 16)
+C(go.MouseButton1Click, function()
+	local mod = mods[TABS[cur].key]
+	if mod then mod.SetActive(not mod.IsActive()) end
+end)
+
+task.spawn(function()
+	while gui.Parent do
+		for i, t in ipairs(TABS) do
+			local mod = mods[t.key]
+			if mod then
+				local okI, txt = pcall(mod.Info)
+				if okI then infos[i].Text = txt end
+				local run = mod.IsActive()
+				hero[i].Text = run and "● Berjalan" or "○ Berhenti"
+				hero[i].TextColor3 = run and K.ok or K.tx2
+			end
+		end
+		for _, f in ipairs(refreshers) do pcall(f) end
+		local mod = mods[TABS[cur].key]
+		if mod then
+			local run = mod.IsActive()
+			go.Text = run and "Berhenti" or "Mulai"
+			go.BackgroundColor3 = run and K.bad or K.ok
+		else
+			go.Text = "Tidak tersedia"
+			go.BackgroundColor3 = K.off
+		end
+		task.wait(0.3)
+	end
+end)
+
+setTab(1)

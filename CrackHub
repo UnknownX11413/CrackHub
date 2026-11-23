@@ -258,7 +258,7 @@ local function ModTani()
 	local Aksi = Tani:WaitForChild("Tani_Aksi")
 
 	local S = {
-		Run = true, Aktif = false, ESP = true,
+		Run = true, Aktif = false, ESP = true, Jalan = false,
 		Cangkul = true, Tanam = true,
 		Bibit = (Cfg.URUT_BIBIT and Cfg.URUT_BIBIT[1]) or "Bibit Padi",
 		Panen = true, Petik = true, Pungut = true, Goyang = true, Tebang = true, Siram = true, Lain = false,
@@ -364,21 +364,109 @@ local function ModTani()
 		return t
 	end
 
+	-- ===== ANIMASI (mode JALAN) =====
+	local animCache, animOwner = {}, nil
+	local function playAnim(name)
+		if not S.Jalan then return end
+		local h = hum()
+		local id = Cfg.ANIM and Cfg.ANIM[name]
+		if not (h and id) then return end
+		local an = h:FindFirstChildOfClass("Animator")
+		if not an then return end
+		if animOwner ~= an then table.clear(animCache) animOwner = an end
+		local tr = animCache[name]
+		if not tr then
+			local a = Instance.new("Animation")
+			a.AnimationId = id
+			local ok, t = pcall(an.LoadAnimation, an, a)
+			if not ok or not t then return end
+			t.Priority = Enum.AnimationPriority.Action2
+			t.Looped = false
+			animCache[name] = t
+			tr = t
+		end
+		tr:Play(0.12, 1, 1)
+	end
+
+	-- kirim aksi pada momen animasi; return sisa waktu animasi (nil kalau mode teleport)
+	local function fireWithAnim(anim, ...)
+		if S.Jalan and Cfg.ANIM and Cfg.ANIM[anim] then
+			local momen = (Cfg.MOMEN and Cfg.MOMEN[anim]) or 0.5
+			playAnim(anim)
+			task.wait(momen)
+			Aksi:FireServer(...)
+			return math.max(0, ((Cfg.DURASI and Cfg.DURASI[anim]) or 1) - momen) + 0.15
+		end
+		Aksi:FireServer(...)
+		return nil
+	end
+
+	local function groundY(pos, gy)
+		if gy then return gy end
+		local rp = RaycastParams.new()
+		rp.FilterType = Enum.RaycastFilterType.Exclude
+		rp.FilterDescendantsInstances = { LP.Character, anchors }
+		local hit = workspace:Raycast(pos + Vector3.new(0, 3, 0), Vector3.new(0, -40, 0), rp)
+		return hit and hit.Position.Y or pos.Y
+	end
+
+	-- teleport
 	local function tpTo(pos, face, gy)
 		local r, h = hrp(), hum()
 		if not (r and h) then return end
-		if not gy then
-			local rp = RaycastParams.new()
-			rp.FilterType = Enum.RaycastFilterType.Exclude
-			rp.FilterDescendantsInstances = { LP.Character, anchors }
-			local hit = workspace:Raycast(pos + Vector3.new(0, 3, 0), Vector3.new(0, -40, 0), rp)
-			gy = hit and hit.Position.Y or pos.Y
-		end
+		gy = groundY(pos, gy)
 		local p = Vector3.new(pos.X, gy + h.HipHeight + r.Size.Y / 2 + 0.1, pos.Z)
 		local f = Vector3.new(face.X, p.Y, face.Z)
 		if (f - p).Magnitude < 0.1 then f = p + Vector3.new(0, 0, -1) end
 		r.AssemblyLinearVelocity = Vector3.zero
 		r.CFrame = CFrame.lookAt(p, f)
+	end
+
+	-- gerak: JALAN (animasi bawaan game) atau TELEPORT, sesuai S.Jalan
+	local function goTo(pos, face, gy)
+		if not S.Jalan then return tpTo(pos, face, gy) end
+		local r, h = hrp(), hum()
+		if not (r and h) then return end
+		gy = groundY(pos, gy)
+		local tgt = Vector3.new(pos.X, gy + 3, pos.Z)
+		local t0 = os.clock()
+		local dist = d2(r.Position, pos)
+		local limit = dist / 12 + 6
+		local lastD, lastProg, stuck = dist, os.clock(), 0
+		while true do
+			r, h = hrp(), hum()
+			if not (r and h) or h.Health <= 0 then return end
+			if not (S.Run and (S.Aktif or goyangBusy)) then
+				h:MoveTo(r.Position)
+				return
+			end
+			local d = d2(r.Position, pos)
+			if d < 1.2 then break end
+			if os.clock() - t0 > limit or stuck >= 3 then
+				tpTo(pos, face, gy) -- cadangan kalau tersangkut
+				return
+			end
+			if h.WalkSpeed <= 0 then
+				lastProg = os.clock() -- sedang dikunci animasi aksi, tunggu
+			elseif d < lastD - 0.3 then
+				lastD, lastProg = d, os.clock()
+			elseif os.clock() - lastProg > 1 then
+				h.Jump = true
+				stuck += 1
+				lastProg = os.clock()
+			end
+			h:MoveTo(tgt)
+			task.wait(0.1)
+		end
+		r, h = hrp(), hum()
+		if r and h then
+			h:MoveTo(r.Position)
+			local f = Vector3.new(face.X, r.Position.Y, face.Z)
+			if (f - r.Position).Magnitude > 0.1 then
+				r.CFrame = CFrame.lookAt(r.Position, f)
+			end
+			task.wait(0.1)
+		end
 	end
 
 	-- ===== kepemilikan =====
@@ -799,11 +887,11 @@ local function ModTani()
 			local r = hrp()
 			if r and typeof(data.batang) == "Vector3" then
 				local dir = unit(r.Position - data.batang, Vector3.new(0, 0, 1))
-				tpTo(data.batang + dir * Cfg.GOYANG.JARAK_BATANG, data.batang, nil)
+				goTo(data.batang + dir * Cfg.GOYANG.JARAK_BATANG, data.batang, nil)
 			end
 			task.wait(0.3)
-			Aksi:FireServer("goyang", data.token, true)
-			task.wait(Cfg.DURASI.Goyang or 3)
+			local rest = fireWithAnim("Goyang", "goyang", data.token, true)
+			task.wait(rest or (Cfg.DURASI.Goyang or 3))
 			pcall(task.cancel, fs)
 			goyangBusy = false
 			mark()
@@ -834,7 +922,8 @@ local function ModTani()
 		local p, cat = a.p, a.cat
 		local r = hrp()
 		local dir = unit(r.Position - a.pos, a.P.area.CFrame.RightVector)
-		tpTo(a.pos + dir * 2.2, a.pos, a.top)
+		goTo(a.pos + dir * 2.2, a.pos, a.top)
+		if not S.Aktif then return end
 		task.wait(0.25)
 		local now = os.clock()
 		fails[p] = (fails[p] or 0) + 1
@@ -843,6 +932,11 @@ local function ModTani()
 			fails[p] = 0
 		else
 			cool[p] = now + (cat == "Goyang" and 14 or cat == "Siram" and 60 or 3)
+		end
+		local an = ({ Panen = "Cabut", Petik = "Petik", Pungut = "Pungut" })[cat]
+		if an and S.Jalan then
+			playAnim(an)
+			task.wait((Cfg.MOMEN and Cfg.MOMEN[an]) or 0.5)
 		end
 		firePrompt(p)
 		task.wait(0.25)
@@ -912,10 +1006,10 @@ local function ModTani()
 		if target == "gembur" then tillUntil = os.clock() + 99 end
 		while S.Aktif and g == gen and loops < 8 and s.stage ~= target do
 			status = ("Cangkul sel (%s, %dx)"):format(stageTxt[s.stage], s.hits + 1)
-			Aksi:FireServer("cangkul")
+			local rest = fireWithAnim("Cangkul", "cangkul")
 			loops += 1
 			s.hits += 1
-			task.wait(Cfg.DURASI.Cangkul + 0.15)
+			task.wait(rest or (Cfg.DURASI.Cangkul + 0.15))
 			if hoeInfo.jadi and hoeInfo.jadi >= startT then
 				hoeInfo.jadi = nil
 				setStage(s, "gundukan")
@@ -955,11 +1049,12 @@ local function ModTani()
 		if bibit ~= S.Bibit then return nil end
 		if not equip(bibit) then return nil end
 		local g = gen
-		local before, t0 = addTick, os.clock()
-		Aksi:FireServer("tanam")
+		local before = addTick
+		fireWithAnim("Tanam", "tanam")
+		local t0 = os.clock()
 		while os.clock() - t0 < Cfg.DURASI.Tanam + 1.5 and addTick == before and S.Aktif and g == gen do task.wait(0.05) end
 		local ok = addTick ~= before
-		local rest = Cfg.DURASI.Tanam + 0.1 - (os.clock() - t0)
+		local rest = (S.Jalan and 0.5 or Cfg.DURASI.Tanam + 0.1) - (os.clock() - t0)
 		if rest > 0 then task.wait(rest) end
 		return ok
 	end
@@ -1016,7 +1111,8 @@ local function ModTani()
 		local bibit = S.Bibit
 		local g = gen
 		local look = unit(c.P.area.CFrame.LookVector, Vector3.new(0, 0, -1))
-		tpTo(c.pos - look * DEPAN, c.pos, c.top)
+		goTo(c.pos - look * DEPAN, c.pos, c.top)
+		if not S.Aktif then return end
 		task.wait(0.3)
 		if g ~= gen then return end
 		if legacy(bibit) then
@@ -1138,6 +1234,13 @@ local function ModTani()
 	local M = { S = S, Seeds = Cfg.URUT_BIBIT or { "Bibit Padi", "Bibit Pisang" } }
 	function M.SetActive(v) S.Aktif = v and true or false mark() end
 	function M.IsActive() return S.Aktif end
+	function M.SetJalan(v)
+		S.Jalan = v and true or false
+		gen += 1
+		local h, r = hum(), hrp()
+		if h and r then h:MoveTo(r.Position) end
+		mark()
+	end
 	function M.Kill() S.Stop() end
 	function M.Info()
 		local n = D.n
@@ -2672,6 +2775,8 @@ local function buildMain(mods, errs)
 				function(v) mod.CFG.AfterCatchDelay = v end, 1, 8, 0.5)
 		elseif t.key == "Tani" then
 			infos[i] = infoCard(page)
+			header(page, "GERAK")
+			switchRow(page, "Mode Jalan (animasi)", function() return mod.S.Jalan end, function(v) mod.SetJalan(v) end)
 			header(page, "BIBIT")
 			local seedRow = new("Frame", { Size = UDim2.new(1, 0, 0, 36), BackgroundTransparency = 1 }, page)
 			local seedBtns = {}
@@ -2743,7 +2848,7 @@ local function buildMain(mods, errs)
 
 	-- footer
 	local go = new("TextButton", {
-		Size = UDim2.new(1, -36, 0, 48), Position = UDim2.new(0, 18, 1, -62), BackgroundColor3 = C.ok,
+		Size = UDim2.new(1, -36, 0, 48), Position = UDim2.new(0, 18, 1, -68), BackgroundColor3 = C.ok,
 		Text = "Mulai", Font = Enum.Font.GothamBold, TextSize = 17, TextColor3 = Color3.new(1, 1, 1), AutoButtonColor = true,
 	}, win)
 	round(go, 16)
@@ -2778,6 +2883,45 @@ local function buildMain(mods, errs)
 		end
 	end)
 
+	-- grip resize (pojok kanan bawah) untuk menyesuaikan ukuran di HP
+	local grip = new("TextButton", {
+		Size = UDim2.fromOffset(34, 34), AnchorPoint = Vector2.new(1, 1), Position = UDim2.new(1, -2, 1, -2),
+		BackgroundTransparency = 1, Text = "", ZIndex = 20, AutoButtonColor = false,
+	}, win)
+	new("Frame", {
+		Size = UDim2.fromOffset(11, 2), AnchorPoint = Vector2.new(1, 1), Position = UDim2.new(1, -8, 1, -8),
+		BackgroundColor3 = C.tx2, BorderSizePixel = 0, ZIndex = 21,
+	}, grip)
+	new("Frame", {
+		Size = UDim2.fromOffset(2, 11), AnchorPoint = Vector2.new(1, 1), Position = UDim2.new(1, -8, 1, -8),
+		BackgroundColor3 = C.tx2, BorderSizePixel = 0, ZIndex = 21,
+	}, grip)
+	do
+		local MINW, MINH = 280, 380
+		local rs, rStart, rSize, rPos
+		on(grip.InputBegan, function(i)
+			if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+				rs, rStart, rSize, rPos = true, i.Position, win.Size, win.Position
+			end
+		end)
+		on(UIS.InputChanged, function(i)
+			if rs and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+				local sc = scale.Scale
+				local d = (i.Position - rStart) / sc
+				local vs = workspace.CurrentCamera.ViewportSize
+				local maxW = math.max(MINW, math.min(560, vs.X / sc - 16))
+				local maxH = math.max(MINH, math.min(820, vs.Y / sc - 16))
+				local nw = math.clamp(rSize.X.Offset + d.X, MINW, maxW)
+				local nh = math.clamp(rSize.Y.Offset + d.Y, MINH, maxH)
+				win.Size = UDim2.fromOffset(nw, nh)
+				win.Position = UDim2.new(rPos.X.Scale, rPos.X.Offset + (nw - rSize.X.Offset) / 2,
+					rPos.Y.Scale, rPos.Y.Offset + (nh - rSize.Y.Offset) / 2)
+			end
+		end)
+		on(UIS.InputEnded, function(i)
+			if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then rs = false end
+		end)
+	end
 	win.Size = UDim2.fromOffset(350, 520)
 	setTab(1)
 end

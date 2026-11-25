@@ -1,0 +1,738 @@
+-- FLYHUB | Fly + Spectate + Teleport + Daftar Pemain (tema iOS, standalone)
+-- Keybind: F = Fly | P = Spectate | Q = TP ke Mouse | R = Kembali ke posisi tersimpan
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UIS = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+
+local lp = Players.LocalPlayer
+local cam = workspace.CurrentCamera
+
+local env = (getgenv and getgenv()) or _G
+if env.__FLYHUB_KILL then pcall(env.__FLYHUB_KILL) end
+
+local conns = {}
+local function C(sig, fn) local c = sig:Connect(fn); conns[#conns + 1] = c; return c end
+
+local State = {
+	flyEnabled = false,
+	spectateEnabled = false,
+	spectateTarget = nil,
+	flySpeed = 60,
+	spectateRadius = 2000,
+	savedPos = nil,
+	noCollideData = {},
+	vel = Vector3.new(0, 0, 0),
+	flyConn = nil,
+	specConn = nil,
+}
+
+--====================================================================
+-- HELPERS
+--====================================================================
+local function getChar() return lp.Character end
+local function getHRP() local c = getChar() return c and c:FindFirstChild("HumanoidRootPart") end
+local function getHum() local c = getChar() return c and c:FindFirstChildOfClass("Humanoid") end
+
+local function setNoCollide(enable)
+	local char = getChar()
+	if not char then return end
+	if enable then
+		for _, p in ipairs(char:GetDescendants()) do
+			if p:IsA("BasePart") and p.CanCollide then
+				table.insert(State.noCollideData, p)
+				p.CanCollide = false
+			end
+		end
+	else
+		for _, p in ipairs(State.noCollideData) do
+			pcall(function() p.CanCollide = true end)
+		end
+		State.noCollideData = {}
+	end
+end
+
+local function streamBypass(pos, radius)
+	if workspace.StreamingEnabled then
+		pcall(function()
+			workspace.StreamingMinRadius = radius
+			workspace.StreamingTargetRadius = radius * 2
+		end)
+	end
+	for x = -1, 1 do
+		for z = -1, 1 do
+			pcall(function()
+				workspace:RequestStreamAroundAsync(pos + Vector3.new(x, 0, z) * radius * 0.5, 5)
+			end)
+		end
+	end
+end
+
+--====================================================================
+-- FLY (avatar selalu tegak, kecepatan di-lerp supaya halus)
+--====================================================================
+local ACCEL, DECEL = 12, 16
+
+local function cleanFlyMotors()
+	local hrp = getHRP()
+	if hrp then
+		local bv = hrp:FindFirstChild("__FlyBV"); if bv then bv:Destroy() end
+		local bg = hrp:FindFirstChild("__FlyBG"); if bg then bg:Destroy() end
+	end
+end
+
+local function enableFly()
+	cleanFlyMotors()
+	local hrp, hum = getHRP(), getHum()
+	if not hrp or not hum then return end
+
+	hum.PlatformStand = true
+	hum.JumpPower = 0
+	hum.AutoRotate = false
+	State.noCollideData = {}
+	setNoCollide(true)
+
+	local bv = Instance.new("BodyVelocity")
+	bv.Name = "__FlyBV"
+	bv.MaxForce = Vector3.new(1e9, 1e9, 1e9)
+	bv.Velocity = Vector3.new(0, 0, 0)
+	bv.Parent = hrp
+
+	local bg = Instance.new("BodyGyro")
+	bg.Name = "__FlyBG"
+	bg.MaxTorque = Vector3.new(1e9, 1e9, 1e9)
+	bg.P = 5e4
+	bg.D = 500
+	bg.CFrame = hrp.CFrame
+	bg.Parent = hrp
+
+	State.vel = Vector3.new(0, 0, 0)
+	local ncTimer = 0
+
+	if State.flyConn then State.flyConn:Disconnect() end
+	State.flyConn = RunService.Heartbeat:Connect(function(dt)
+		if not State.flyEnabled then return end
+		local hrp2, hum2 = getHRP(), getHum()
+		if not hrp2 then return end
+
+		local camCF = cam.CFrame
+		local look, right = camCF.LookVector, camCF.RightVector
+		local flatLook = Vector3.new(look.X, 0, look.Z)
+		local flatUnit = flatLook.Magnitude > 0.01 and flatLook.Unit or Vector3.new(0, 0, -1)
+		local flatRight = Vector3.new(right.X, 0, right.Z)
+		flatRight = flatRight.Magnitude > 0.01 and flatRight.Unit or Vector3.new(1, 0, 0)
+
+		local rawDir = Vector3.new(0, 0, 0)
+
+		-- joystick / WASD lewat MoveDirection (HP & PC), diterjemahkan ke arah kamera penuh
+		local md = hum2 and hum2.MoveDirection or Vector3.new()
+		if md.Magnitude > 0.05 then
+			rawDir = rawDir + look * md:Dot(flatUnit) + right * md:Dot(flatRight)
+		else
+			if UIS:IsKeyDown(Enum.KeyCode.W) then rawDir = rawDir + look end
+			if UIS:IsKeyDown(Enum.KeyCode.S) then rawDir = rawDir - look end
+			if UIS:IsKeyDown(Enum.KeyCode.A) then rawDir = rawDir - right end
+			if UIS:IsKeyDown(Enum.KeyCode.D) then rawDir = rawDir + right end
+		end
+		if UIS:IsKeyDown(Enum.KeyCode.Space) then rawDir = rawDir + Vector3.yAxis end
+		if UIS:IsKeyDown(Enum.KeyCode.LeftShift) then rawDir = rawDir - Vector3.yAxis end
+
+		local dir = rawDir.Magnitude > 1 and rawDir.Unit or rawDir
+		local targetVel = dir * State.flySpeed
+		local alpha = dir.Magnitude > 0 and math.min(1, dt * ACCEL) or math.min(1, dt * DECEL)
+		State.vel = State.vel:Lerp(targetVel, alpha)
+		bv.Velocity = State.vel
+
+		-- avatar tegak: hanya ikut yaw kamera
+		bg.CFrame = CFrame.fromMatrix(hrp2.Position, flatUnit:Cross(Vector3.yAxis).Unit * -1, Vector3.yAxis, -flatUnit)
+
+		ncTimer = ncTimer + dt
+		if ncTimer >= 0.5 then
+			ncTimer = 0
+			setNoCollide(true)
+		end
+	end)
+end
+
+local function disableFly()
+	if State.flyConn then State.flyConn:Disconnect(); State.flyConn = nil end
+	cleanFlyMotors()
+	State.vel = Vector3.new(0, 0, 0)
+	local hum = getHum()
+	if hum then
+		hum.PlatformStand = false
+		hum.JumpPower = 50
+		hum.AutoRotate = true
+	end
+	setNoCollide(false)
+end
+
+local function setFly(v)
+	v = v and true or false
+	if v == State.flyEnabled then return end
+	State.flyEnabled = v
+	if v then enableFly() else disableFly() end
+end
+
+--====================================================================
+-- SPECTATE
+--====================================================================
+local function disableSpectate()
+	State.spectateEnabled = false
+	State.spectateTarget = nil
+	if State.specConn then State.specConn:Disconnect(); State.specConn = nil end
+	cam.CameraType = Enum.CameraType.Custom
+end
+
+local function enableSpectate(target)
+	if State.specConn then State.specConn:Disconnect(); State.specConn = nil end
+	State.spectateEnabled = true
+	State.spectateTarget = target
+	cam.CameraType = Enum.CameraType.Scriptable
+	State.specConn = RunService.Heartbeat:Connect(function()
+		if not State.spectateEnabled then return end
+		if not (target and target.Parent) then disableSpectate() return end
+		local tChar = target.Character
+		if not tChar then return end
+		local tHRP = tChar:FindFirstChild("HumanoidRootPart")
+		if not tHRP then return end
+		local offset = CFrame.Angles(math.rad(-12), 0, 0) * CFrame.new(0, 2, -10)
+		cam.CFrame = tHRP.CFrame * offset
+		streamBypass(tHRP.Position, State.spectateRadius)
+	end)
+end
+
+local function getTargetList()
+	local t = {}
+	for _, p in ipairs(Players:GetPlayers()) do
+		if p ~= lp then table.insert(t, p) end
+	end
+	table.sort(t, function(a, b) return a.DisplayName:lower() < b.DisplayName:lower() end)
+	return t
+end
+
+local function stepSpectate(dir)
+	local list = getTargetList()
+	if #list == 0 then return end
+	local idx = table.find(list, State.spectateTarget) or 0
+	idx = ((idx - 1 + dir) % #list) + 1
+	enableSpectate(list[idx])
+end
+
+local function toggleSpectate()
+	if State.spectateEnabled then
+		disableSpectate()
+	else
+		local list = getTargetList()
+		if list[1] then enableSpectate(list[1]) end
+	end
+end
+
+--====================================================================
+-- TELEPORT
+--====================================================================
+local function savePos()
+	local hrp = getHRP()
+	if hrp then State.savedPos = hrp.CFrame end
+end
+local function returnPos()
+	if State.savedPos then
+		local hrp = getHRP()
+		if hrp then hrp.CFrame = State.savedPos end
+	end
+end
+local function tpMouse()
+	local m = UIS:GetMouseLocation()
+	local ray = cam:ViewportPointToRay(m.X, m.Y)
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = { getChar() }
+	local hit = workspace:Raycast(ray.Origin, ray.Direction * 5000, params)
+	if hit then
+		local hrp = getHRP()
+		if hrp then hrp.CFrame = CFrame.new(hit.Position + Vector3.new(0, 3, 0)) end
+	end
+end
+local function tpToPlayer(plr)
+	local tc = plr.Character
+	local th = tc and tc:FindFirstChild("HumanoidRootPart")
+	local hrp = getHRP()
+	if th and hrp then
+		hrp.CFrame = th.CFrame * CFrame.new(0, 0, 4)
+	end
+end
+
+--====================================================================
+-- UI ala iOS
+--====================================================================
+local K = {
+	bg = Color3.fromRGB(28, 28, 30),
+	card = Color3.fromRGB(44, 44, 46),
+	card2 = Color3.fromRGB(62, 62, 66),
+	tx = Color3.fromRGB(245, 245, 247),
+	tx2 = Color3.fromRGB(152, 152, 157),
+	gold = Color3.fromRGB(224, 176, 82),
+	ok = Color3.fromRGB(52, 199, 89),
+	bad = Color3.fromRGB(255, 59, 48),
+	warn = Color3.fromRGB(255, 204, 0),
+	off = Color3.fromRGB(88, 88, 92),
+}
+
+local function new(cls, props, parent)
+	local o = Instance.new(cls)
+	for k, v in pairs(props) do o[k] = v end
+	o.Parent = parent
+	return o
+end
+local function round(o, r) return new("UICorner", { CornerRadius = UDim.new(0, r) }, o) end
+local function tween(o, t, props)
+	TweenService:Create(o, TweenInfo.new(t, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), props):Play()
+end
+
+local gui = new("ScreenGui", {
+	Name = "FlyHubUI", ResetOnSpawn = false, ZIndexBehavior = Enum.ZIndexBehavior.Sibling, IgnoreGuiInset = true,
+}, (gethui and gethui()) or game:GetService("CoreGui"))
+
+local function Kill()
+	if State.flyEnabled then State.flyEnabled = false; disableFly() end
+	if State.spectateEnabled then disableSpectate() end
+	for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+	table.clear(conns)
+	pcall(function() gui:Destroy() end)
+	env.__FLYHUB_KILL = nil
+end
+env.__FLYHUB_KILL = Kill
+
+local refreshers = {}
+
+local function header(parent, text, order)
+	return new("TextLabel", {
+		Size = UDim2.new(1, 0, 0, 20), BackgroundTransparency = 1, Text = text,
+		Font = Enum.Font.GothamBold, TextSize = 12, TextColor3 = K.gold,
+		TextXAlignment = Enum.TextXAlignment.Left, LayoutOrder = order or 0,
+	}, parent)
+end
+
+local function infoCard(parent, order)
+	local card = new("Frame", {
+		Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundColor3 = K.card, BorderSizePixel = 0, LayoutOrder = order or 0,
+	}, parent)
+	round(card, 12)
+	new("UIPadding", { PaddingTop = UDim.new(0, 10), PaddingBottom = UDim.new(0, 10), PaddingLeft = UDim.new(0, 12), PaddingRight = UDim.new(0, 12) }, card)
+	return new("TextLabel", {
+		Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1,
+		Text = "-", Font = Enum.Font.Gotham, TextSize = 12, TextColor3 = K.tx2, TextWrapped = true,
+		TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
+	}, card)
+end
+
+local function switchRow(parent, text, get, set, order)
+	local row = new("Frame", { Size = UDim2.new(1, 0, 0, 42), BackgroundColor3 = K.card, BorderSizePixel = 0, LayoutOrder = order or 0 }, parent)
+	round(row, 12)
+	new("TextLabel", {
+		Size = UDim2.new(1, -70, 1, 0), Position = UDim2.fromOffset(12, 0), BackgroundTransparency = 1,
+		Text = text, Font = Enum.Font.Gotham, TextSize = 14, TextColor3 = K.tx,
+		TextXAlignment = Enum.TextXAlignment.Left,
+	}, row)
+	local sw = new("TextButton", {
+		Size = UDim2.fromOffset(46, 26), Position = UDim2.new(1, -56, 0.5, -13),
+		BackgroundColor3 = K.off, Text = "", AutoButtonColor = false,
+	}, row)
+	round(sw, 13)
+	local knob = new("Frame", {
+		Size = UDim2.fromOffset(22, 22), Position = UDim2.fromOffset(2, 2),
+		BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0,
+	}, sw)
+	round(knob, 11)
+	local last
+	local function render()
+		local v = get() and true or false
+		if v == last then return end
+		last = v
+		tween(sw, 0.2, { BackgroundColor3 = v and K.ok or K.off })
+		tween(knob, 0.2, { Position = v and UDim2.fromOffset(22, 2) or UDim2.fromOffset(2, 2) })
+	end
+	C(sw.MouseButton1Click, function() set(not get()) render() end)
+	render()
+	table.insert(refreshers, render)
+end
+
+local function stepper(parent, text, get, set, minv, maxv, stp, order)
+	local row = new("Frame", { Size = UDim2.new(1, 0, 0, 42), BackgroundColor3 = K.card, BorderSizePixel = 0, LayoutOrder = order or 0 }, parent)
+	round(row, 12)
+	new("TextLabel", {
+		Size = UDim2.new(1, -170, 1, 0), Position = UDim2.fromOffset(12, 0), BackgroundTransparency = 1,
+		Text = text, Font = Enum.Font.Gotham, TextSize = 14, TextColor3 = K.tx,
+		TextXAlignment = Enum.TextXAlignment.Left,
+	}, row)
+	local val = new("TextLabel", {
+		Size = UDim2.fromOffset(64, 28), Position = UDim2.new(1, -106, 0.5, -14), BackgroundTransparency = 1,
+		Text = "", Font = Enum.Font.GothamBold, TextSize = 13, TextColor3 = K.gold,
+	}, row)
+	local function render() val.Text = tostring(get()) end
+	local function btn(txt, x, dir)
+		local b = new("TextButton", {
+			Size = UDim2.fromOffset(28, 28), Position = UDim2.new(1, x, 0.5, -14),
+			BackgroundColor3 = K.card2, Text = txt, Font = Enum.Font.GothamBold, TextSize = 16,
+			TextColor3 = K.tx, AutoButtonColor = true,
+		}, row)
+		round(b, 8)
+		C(b.MouseButton1Click, function()
+			set(math.clamp(get() + dir * stp, minv, maxv))
+			render()
+		end)
+	end
+	btn("−", -138, -1)
+	btn("+", -38, 1)
+	render()
+end
+
+local function actionBtn(parent, text, cb, order)
+	local b = new("TextButton", {
+		Size = UDim2.new(1, 0, 0, 38), BackgroundColor3 = K.card2, Text = text,
+		Font = Enum.Font.GothamMedium, TextSize = 13, TextColor3 = K.tx, AutoButtonColor = true, LayoutOrder = order or 0,
+	}, parent)
+	round(b, 12)
+	C(b.MouseButton1Click, cb)
+	return b
+end
+
+-- ---------- WINDOW ----------
+local win = new("Frame", {
+	Name = "Window", Size = UDim2.fromOffset(350, 540), AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.fromScale(0.5, 0.5), BackgroundColor3 = K.bg, BackgroundTransparency = 0.04, BorderSizePixel = 0,
+}, gui)
+round(win, 26)
+new("UIStroke", { Color = Color3.fromRGB(80, 80, 84), Thickness = 1, Transparency = 0.3 }, win)
+local scale = new("UIScale", { Scale = math.clamp(cam.ViewportSize.Y / 660, 0.6, 1) }, win)
+
+local head = new("Frame", { Size = UDim2.new(1, 0, 0, 60), BackgroundTransparency = 1 }, win)
+new("TextLabel", {
+	Size = UDim2.new(1, -110, 0, 26), Position = UDim2.fromOffset(18, 10), BackgroundTransparency = 1,
+	Text = "FLYHUB", Font = Enum.Font.GothamBlack, TextSize = 22, TextColor3 = K.tx,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, head)
+new("TextLabel", {
+	Size = UDim2.new(1, -110, 0, 16), Position = UDim2.fromOffset(18, 36), BackgroundTransparency = 1,
+	Text = "Fly · Spectate · Teleport · Pemain", Font = Enum.Font.GothamBold, TextSize = 11, TextColor3 = K.gold,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, head)
+
+local bubble = new("TextButton", {
+	Size = UDim2.fromOffset(46, 46), Position = UDim2.new(0, 16, 0.5, -23), BackgroundColor3 = K.gold,
+	Text = "F", Font = Enum.Font.GothamBlack, TextSize = 20, TextColor3 = Color3.fromRGB(40, 28, 8),
+	Visible = false, AutoButtonColor = true,
+}, gui)
+round(bubble, 23)
+
+local function dot(x, color, txt, cb)
+	local b = new("TextButton", {
+		Size = UDim2.fromOffset(24, 24), Position = UDim2.new(1, x, 0, 18), BackgroundColor3 = color,
+		Text = txt, Font = Enum.Font.GothamBold, TextSize = 12, TextColor3 = Color3.fromRGB(60, 40, 0),
+		AutoButtonColor = true,
+	}, head)
+	round(b, 12)
+	C(b.MouseButton1Click, cb)
+end
+local function setHidden(h) win.Visible = not h bubble.Visible = h end
+dot(-62, K.warn, "–", function() setHidden(true) end)
+dot(-34, K.bad, "✕", Kill)
+C(bubble.MouseButton1Click, function() setHidden(false) end)
+
+do
+	local dragging, ds, sp
+	C(head.InputBegan, function(i)
+		if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+			dragging, ds, sp = true, i.Position, win.Position
+		end
+	end)
+	C(UIS.InputChanged, function(i)
+		if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+			local d = i.Position - ds
+			win.Position = UDim2.new(sp.X.Scale, sp.X.Offset + d.X / scale.Scale, sp.Y.Scale, sp.Y.Offset + d.Y / scale.Scale)
+		end
+	end)
+	C(UIS.InputEnded, function(i)
+		if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then dragging = false end
+	end)
+end
+
+-- tabs
+local TABS = { "Fly", "Pemain", "Teleport" }
+local seg = new("Frame", {
+	Size = UDim2.new(1, -36, 0, 36), Position = UDim2.fromOffset(18, 62), BackgroundColor3 = K.card, BorderSizePixel = 0,
+}, win)
+round(seg, 11)
+local pill = new("Frame", {
+	Size = UDim2.new(1 / #TABS, -4, 1, -6), Position = UDim2.new(0, 3, 0, 3), BackgroundColor3 = K.card2, BorderSizePixel = 0,
+}, seg)
+round(pill, 9)
+
+local pageHost = new("Frame", {
+	Size = UDim2.new(1, -36, 1, -180), Position = UDim2.fromOffset(18, 108), BackgroundTransparency = 1, ClipsDescendants = true,
+}, win)
+
+local pages = {}
+local cur = 1
+local function setTab(i)
+	cur = i
+	tween(pill, 0.3, { Position = UDim2.new((i - 1) / #TABS, 3, 0, 3) })
+	for k, p in ipairs(pages) do p.Visible = (k == i) end
+end
+
+for i, name in ipairs(TABS) do
+	local b = new("TextButton", {
+		Size = UDim2.new(1 / #TABS, 0, 1, 0), Position = UDim2.new((i - 1) / #TABS, 0, 0, 0), BackgroundTransparency = 1,
+		Text = name, Font = Enum.Font.GothamBold, TextSize = 13, TextColor3 = K.tx, ZIndex = 2,
+	}, seg)
+	C(b.MouseButton1Click, function() setTab(i) end)
+	local page = new("ScrollingFrame", {
+		Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 3,
+		AutomaticCanvasSize = Enum.AutomaticSize.Y, CanvasSize = UDim2.new(), Visible = (i == 1),
+	}, pageHost)
+	new("UIListLayout", { Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder }, page)
+	pages[i] = page
+end
+
+-- ---------- TAB FLY ----------
+local flyInfo = infoCard(pages[1], 1)
+header(pages[1], "FLY", 2)
+switchRow(pages[1], "Fly", function() return State.flyEnabled end, setFly, 3)
+stepper(pages[1], "Kecepatan", function() return State.flySpeed end, function(v) State.flySpeed = v end, 10, 400, 10, 4)
+local flyHelp = infoCard(pages[1], 5)
+flyHelp.Text = "Joystick / WASD = terbang ke arah kamera (termasuk naik/turun)\nSpace = naik • Shift = turun\nAvatar selalu tegak • No collision • Lompat dimatikan"
+
+-- ---------- TAB PEMAIN ----------
+local specInfo = infoCard(pages[2], 1)
+local navRow = new("Frame", { Size = UDim2.new(1, 0, 0, 38), BackgroundTransparency = 1, LayoutOrder = 2 }, pages[2])
+local function navBtn(text, x, w, cb)
+	local b = new("TextButton", {
+		Size = UDim2.new(w, -4, 1, 0), Position = UDim2.new(x, 0, 0, 0), BackgroundColor3 = K.card2,
+		Text = text, Font = Enum.Font.GothamBold, TextSize = 13, TextColor3 = K.tx, AutoButtonColor = true,
+	}, navRow)
+	round(b, 12)
+	C(b.MouseButton1Click, cb)
+end
+navBtn("◀  Prev", 0, 0.34, function() stepSpectate(-1) end)
+navBtn("Next  ▶", 0.34, 0.34, function() stepSpectate(1) end)
+navBtn("Stop", 0.68, 0.32, function() if State.spectateEnabled then disableSpectate() end end)
+stepper(pages[2], "Radius Stream", function() return State.spectateRadius end,
+	function(v) State.spectateRadius = v end, 500, 10000, 500, 3)
+
+local searchBox = new("TextBox", {
+	Size = UDim2.new(1, 0, 0, 38), BackgroundColor3 = K.card, BorderSizePixel = 0, Text = "",
+	PlaceholderText = "Cari pemain…", PlaceholderColor3 = K.tx2, Font = Enum.Font.Gotham, TextSize = 14,
+	TextColor3 = K.tx, ClearTextOnFocus = false, LayoutOrder = 4,
+}, pages[2])
+round(searchBox, 12)
+new("UIPadding", { PaddingLeft = UDim.new(0, 12) }, searchBox)
+searchBox.TextXAlignment = Enum.TextXAlignment.Left
+
+local listHeader = header(pages[2], "DAFTAR PEMAIN", 5)
+local listHolder = new("Frame", {
+	Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, LayoutOrder = 6,
+}, pages[2])
+new("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }, listHolder)
+
+local rows = {}
+
+local function applyFilter()
+	local q = searchBox.Text:lower()
+	for plr, r in pairs(rows) do
+		local hit = q == "" or plr.DisplayName:lower():find(q, 1, true) or plr.Name:lower():find(q, 1, true)
+		r.row.Visible = hit and true or false
+	end
+end
+C(searchBox:GetPropertyChangedSignal("Text"), applyFilter)
+
+local function addRow(plr)
+	if plr == lp or rows[plr] then return end
+	local row = new("Frame", { Size = UDim2.new(1, 0, 0, 56), BackgroundColor3 = K.card, BorderSizePixel = 0 }, listHolder)
+	round(row, 12)
+	new("TextLabel", {
+		Size = UDim2.new(1, -140, 0, 20), Position = UDim2.fromOffset(12, 8), BackgroundTransparency = 1,
+		Text = plr.DisplayName, Font = Enum.Font.GothamBold, TextSize = 14, TextColor3 = K.tx,
+		TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
+	}, row)
+	local sub = new("TextLabel", {
+		Size = UDim2.new(1, -140, 0, 16), Position = UDim2.fromOffset(12, 30), BackgroundTransparency = 1,
+		Text = "@" .. plr.Name, Font = Enum.Font.Gotham, TextSize = 11, TextColor3 = K.tx2,
+		TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
+	}, row)
+	local specB = new("TextButton", {
+		Size = UDim2.fromOffset(60, 32), Position = UDim2.new(1, -126, 0.5, -16), BackgroundColor3 = K.card2,
+		Text = "Tonton", Font = Enum.Font.GothamBold, TextSize = 12, TextColor3 = K.tx, AutoButtonColor = true,
+	}, row)
+	round(specB, 9)
+	local tpB = new("TextButton", {
+		Size = UDim2.fromOffset(52, 32), Position = UDim2.new(1, -60, 0.5, -16), BackgroundColor3 = K.card2,
+		Text = "TP", Font = Enum.Font.GothamBold, TextSize = 12, TextColor3 = K.gold, AutoButtonColor = true,
+	}, row)
+	round(tpB, 9)
+	C(specB.MouseButton1Click, function()
+		if State.spectateEnabled and State.spectateTarget == plr then disableSpectate() else enableSpectate(plr) end
+	end)
+	C(tpB.MouseButton1Click, function() tpToPlayer(plr) end)
+	rows[plr] = { row = row, sub = sub, specB = specB }
+	applyFilter()
+end
+
+local function removeRow(plr)
+	local r = rows[plr]
+	if r then
+		r.row:Destroy()
+		rows[plr] = nil
+	end
+	if State.spectateTarget == plr then disableSpectate() end
+end
+
+for _, p in ipairs(Players:GetPlayers()) do addRow(p) end
+C(Players.PlayerAdded, addRow)
+C(Players.PlayerRemoving, removeRow)
+
+-- ---------- TAB TELEPORT ----------
+local tpInfo = infoCard(pages[3], 1)
+actionBtn(pages[3], "Simpan Posisi", savePos, 2)
+actionBtn(pages[3], "Kembali ke Posisi Tersimpan  [R]", returnPos, 3)
+actionBtn(pages[3], "Teleport ke Mouse  [Q]", tpMouse, 4)
+actionBtn(pages[3], "Force Stream Bypass", function()
+	local hrp = getHRP()
+	if hrp then streamBypass(hrp.Position, State.spectateRadius) end
+end, 5)
+actionBtn(pages[3], "Reset Karakter", function()
+	local ok = pcall(function() lp:LoadCharacter() end)
+	if not ok then
+		local h = getHum()
+		if h then h.Health = 0 end
+	end
+end, 6)
+
+-- ---------- FOOTER ----------
+local go = new("TextButton", {
+	Size = UDim2.new(1, -36, 0, 48), Position = UDim2.new(0, 18, 1, -68), BackgroundColor3 = K.ok,
+	Text = "Nyalakan Fly", Font = Enum.Font.GothamBold, TextSize = 17, TextColor3 = Color3.new(1, 1, 1), AutoButtonColor = true,
+}, win)
+round(go, 16)
+C(go.MouseButton1Click, function()
+	if cur == 1 then
+		setFly(not State.flyEnabled)
+	elseif cur == 2 then
+		toggleSpectate()
+	else
+		returnPos()
+	end
+end)
+
+-- ---------- RESIZE (pojok kanan bawah) ----------
+local grip = new("TextButton", {
+	Size = UDim2.fromOffset(34, 34), AnchorPoint = Vector2.new(1, 1), Position = UDim2.new(1, -2, 1, -2),
+	BackgroundTransparency = 1, Text = "", ZIndex = 20, AutoButtonColor = false,
+}, win)
+new("Frame", {
+	Size = UDim2.fromOffset(11, 2), AnchorPoint = Vector2.new(1, 1), Position = UDim2.new(1, -8, 1, -8),
+	BackgroundColor3 = K.tx2, BorderSizePixel = 0, ZIndex = 21,
+}, grip)
+new("Frame", {
+	Size = UDim2.fromOffset(2, 11), AnchorPoint = Vector2.new(1, 1), Position = UDim2.new(1, -8, 1, -8),
+	BackgroundColor3 = K.tx2, BorderSizePixel = 0, ZIndex = 21,
+}, grip)
+do
+	local MINW, MINH = 280, 380
+	local rs, rStart, rSize, rPos
+	C(grip.InputBegan, function(i)
+		if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+			rs, rStart, rSize, rPos = true, i.Position, win.Size, win.Position
+		end
+	end)
+	C(UIS.InputChanged, function(i)
+		if rs and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+			local sc = scale.Scale
+			local d = (i.Position - rStart) / sc
+			local vs = workspace.CurrentCamera.ViewportSize
+			local maxW = math.max(MINW, math.min(560, vs.X / sc - 16))
+			local maxH = math.max(MINH, math.min(820, vs.Y / sc - 16))
+			local nw = math.clamp(rSize.X.Offset + d.X, MINW, maxW)
+			local nh = math.clamp(rSize.Y.Offset + d.Y, MINH, maxH)
+			win.Size = UDim2.fromOffset(nw, nh)
+			win.Position = UDim2.new(rPos.X.Scale, rPos.X.Offset + (nw - rSize.X.Offset) / 2,
+				rPos.Y.Scale, rPos.Y.Offset + (nh - rSize.Y.Offset) / 2)
+		end
+	end)
+	C(UIS.InputEnded, function(i)
+		if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then rs = false end
+	end)
+end
+
+-- ---------- KEYBIND ----------
+C(UIS.InputBegan, function(input, gpe)
+	if gpe then return end
+	local k = input.KeyCode
+	if k == Enum.KeyCode.F then setFly(not State.flyEnabled)
+	elseif k == Enum.KeyCode.P then toggleSpectate()
+	elseif k == Enum.KeyCode.Q then tpMouse()
+	elseif k == Enum.KeyCode.R then returnPos()
+	end
+end)
+
+-- respawn
+C(lp.CharacterAdded, function()
+	task.wait(1)
+	State.noCollideData = {}
+	if State.flyEnabled then
+		disableFly()
+		task.wait(0.05)
+		enableFly()
+	end
+end)
+
+-- ---------- LOOP UPDATE ----------
+task.spawn(function()
+	while gui.Parent do
+		-- fly tab
+		flyInfo.Text = ("Fly: %s | Kecepatan: %d"):format(State.flyEnabled and "ON" or "OFF", State.flySpeed)
+		-- pemain tab
+		local hrp = getHRP()
+		if State.spectateEnabled and State.spectateTarget then
+			specInfo.Text = "Menonton: " .. State.spectateTarget.DisplayName .. " (@" .. State.spectateTarget.Name .. ")"
+			specInfo.TextColor3 = K.ok
+		else
+			specInfo.Text = "Tidak sedang menonton. Pilih pemain di bawah."
+			specInfo.TextColor3 = K.tx2
+		end
+		local count = 0
+		for plr, r in pairs(rows) do
+			count += 1
+			local th = plr.Character and plr.Character:FindFirstChild("HumanoidRootPart")
+			local dist = (hrp and th) and math.floor((hrp.Position - th.Position).Magnitude) or nil
+			r.sub.Text = "@" .. plr.Name .. (dist and (" · " .. dist .. "m") or " · -")
+			local watching = State.spectateEnabled and State.spectateTarget == plr
+			r.specB.Text = watching and "Stop" or "Tonton"
+			r.specB.BackgroundColor3 = watching and K.ok or K.card2
+		end
+		listHeader.Text = "DAFTAR PEMAIN (" .. count .. ")"
+		-- teleport tab
+		if State.savedPos then
+			local p = State.savedPos.Position
+			tpInfo.Text = ("Posisi tersimpan: %d, %d, %d"):format(p.X, p.Y, p.Z)
+		else
+			tpInfo.Text = "Belum ada posisi tersimpan."
+		end
+		-- switch & footer
+		for _, f in ipairs(refreshers) do pcall(f) end
+		if cur == 1 then
+			go.Text = State.flyEnabled and "Matikan Fly" or "Nyalakan Fly"
+			go.BackgroundColor3 = State.flyEnabled and K.bad or K.ok
+		elseif cur == 2 then
+			go.Text = State.spectateEnabled and "Berhenti Spectate" or "Mulai Spectate"
+			go.BackgroundColor3 = State.spectateEnabled and K.bad or K.ok
+		else
+			go.Text = "Kembali ke Posisi Tersimpan"
+			go.BackgroundColor3 = State.savedPos and K.ok or K.off
+		end
+		task.wait(0.3)
+	end
+end)
+
+setTab(1)
